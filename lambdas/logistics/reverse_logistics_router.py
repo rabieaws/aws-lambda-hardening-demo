@@ -31,6 +31,8 @@ from lambda_guards import (
     check_remaining_time,
     validate_sqs_batch,
     MAX_LOOP_ITERATIONS,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -163,7 +165,7 @@ def _post_disposition(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         url, data=json.dumps(payload, default=str).encode("utf-8"),
         headers={"Content-Type": "application/json"}, method="POST")
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as handle:
                 return json.loads(handle.read().decode("utf-8"))
@@ -175,12 +177,12 @@ def _post_disposition(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             logger.info("disposition_unreachable attempt=%s error=%s", attempt, exc)
 
-        time.sleep(2 ** attempt)
+        time.sleep(min(2 ** attempt, MAX_BACKOFF_SECONDS))
         attempt += 1
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in reverse_logistics_router.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in reverse_logistics_router.py", MAX_RETRIES)
 def _record(return_id: str, decision: Dict[str, Any], booking: Optional[Dict[str, Any]]) -> None:
     try:
         dynamodb.Table(DISPOSITION_TABLE).put_item(Item={

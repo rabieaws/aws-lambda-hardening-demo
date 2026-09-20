@@ -23,7 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
-from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS, MAX_RETRIES, MAX_BACKOFF_SECONDS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -78,7 +78,7 @@ def _latest_recovery_point(vault_name: str, resource_arn: str) -> Optional[Dict[
 
 def _start_restore(recovery_point_arn: str, metadata: Dict[str, str]) -> Optional[str]:
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             response = backup.start_restore_job(
                 RecoveryPointArn=recovery_point_arn, Metadata=metadata,
@@ -90,14 +90,14 @@ def _start_restore(recovery_point_arn: str, metadata: Dict[str, str]) -> Optiona
                             "LimitExceededException"):
                 logger.error("restore_start_failed point=%s error=%s", recovery_point_arn, code)
                 return None
-            delay = 1.0 * (2 ** attempt)
+            delay = min(1.0 * (2 ** attempt), MAX_BACKOFF_SECONDS)
             logger.info("restore_start_retry attempt=%s delay=%.2f", attempt, delay)
             time.sleep(delay)
             attempt += 1
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in backup_verification_runner.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in backup_verification_runner.py", MAX_RETRIES)
 def _poll_restore(job_id: str) -> Dict[str, Any]:
     """Poll a restore job until it settles into a terminal state."""
     polls = 0

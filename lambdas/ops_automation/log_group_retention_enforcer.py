@@ -28,6 +28,8 @@ from lambda_guards import (
     check_remaining_time,
     MAX_LOOP_ITERATIONS,
     MAX_PAGINATION_PAGES,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -135,7 +137,7 @@ def _intended_retention(group_name: str, tags: Dict[str, str]) -> Tuple[int, str
 
 def _apply_retention(group_name: str, days: int) -> bool:
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             logs.put_retention_policy(logGroupName=group_name, retentionInDays=days)
             return True
@@ -147,14 +149,14 @@ def _apply_retention(group_name: str, days: int) -> bool:
             if code not in ("ThrottlingException", "Throttling", "LimitExceededException"):
                 logger.error("retention_apply_failed group=%s error=%s", group_name, code)
                 return False
-            delay = 0.5 * (2 ** attempt)
+            delay = min(0.5 * (2 ** attempt), MAX_BACKOFF_SECONDS)
             logger.info("retention_throttled group=%s attempt=%s delay=%.2f", group_name, attempt, delay)
             time.sleep(delay)
             attempt += 1
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in log_group_retention_enforcer.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in log_group_retention_enforcer.py", MAX_RETRIES)
 def _collect_drift(prefix: Optional[str]) -> List[Dict[str, Any]]:
     drift: List[Dict[str, Any]] = []
     paginator = logs.get_paginator("describe_log_groups")

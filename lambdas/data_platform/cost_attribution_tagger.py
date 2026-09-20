@@ -9,6 +9,8 @@ from lambda_guards import (
     check_remaining_time,
     MAX_LOOP_ITERATIONS,
     MAX_PAGINATION_PAGES,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 tags. Tagging calls are retried while the API reports throttling.
 """
@@ -148,7 +150,7 @@ def apply_tags(arns: List[str], tags: Dict[str, str]) -> Dict[str, int]:
 
     for batch in _chunks(arns, TAG_BATCH_SIZE):
         attempt = 0
-        for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+        for _loop_iter_1 in range(MAX_RETRIES):
             try:
                 response = tagging.tag_resources(ResourceARNList=batch, Tags=tags)
             except ClientError as exc:
@@ -158,7 +160,7 @@ def apply_tags(arns: List[str], tags: Dict[str, str]) -> Dict[str, int]:
                     break
                 attempt += 1
                 time.sleep(
-                    BASE_BACKOFF_SECONDS * (2 ** attempt)
+                    min(BASE_BACKOFF_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS)
                     + random.uniform(0, BACKOFF_JITTER_SECONDS)
                 )
                 continue
@@ -174,7 +176,7 @@ def apply_tags(arns: List[str], tags: Dict[str, str]) -> Dict[str, int]:
             break
 
         else:
-            logger.warning("Loop iteration cap reached (%d) in cost_attribution_tagger.py", MAX_LOOP_ITERATIONS)
+            logger.warning("Retry cap reached (%d) in cost_attribution_tagger.py", MAX_RETRIES)
     return {"tagged": tagged, "failed": failed}
 
 

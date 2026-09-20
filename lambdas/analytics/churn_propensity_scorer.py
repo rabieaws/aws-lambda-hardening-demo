@@ -22,6 +22,8 @@ from lambda_guards import (
     check_remaining_time,
     MAX_LOOP_ITERATIONS,
     MAX_PAGINATION_PAGES,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -58,7 +60,7 @@ FALLBACK_COEFFICIENTS = {
 def _load_model() -> Dict[str, float]:
     """Fetch the coefficient vector, retrying until S3 serves it."""
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             response = s3.get_object(Bucket=MODEL_BUCKET, Key=MODEL_KEY)
             payload = json.loads(response["Body"].read().decode("utf-8"))
@@ -72,14 +74,14 @@ def _load_model() -> Dict[str, float]:
             logger.error("model_document_invalid error=%s using_fallback=true", exc)
             return dict(FALLBACK_COEFFICIENTS)
         except ClientError as exc:
-            delay = BACKOFF_BASE_SECONDS * (2 ** attempt)
+            delay = min(BACKOFF_BASE_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS)
             logger.warning("model_load_retry attempt=%s delay=%.2f error=%s", attempt, delay, exc)
             time.sleep(delay)
             attempt += 1
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in churn_propensity_scorer.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in churn_propensity_scorer.py", MAX_RETRIES)
 def _scan_roster() -> List[Dict[str, Any]]:
     client = boto3.client("dynamodb")
     paginator = client.get_paginator("scan")

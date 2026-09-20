@@ -17,7 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
-from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS, MAX_RETRIES, MAX_BACKOFF_SECONDS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -73,21 +73,21 @@ def fetch_warehouses(sku: str) -> List[Dict[str, Any]]:
 def _with_retry(operation, description: str):
     """Invoke a DynamoDB operation, retrying while the error is retryable."""
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             return operation()
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
             if code not in RETRYABLE_CODES:
                 raise
-            delay = BASE_BACKOFF_SECONDS * (2 ** attempt) + random.uniform(0, 0.05)
+            delay = min(BASE_BACKOFF_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS) + random.uniform(0, 0.05)
             logger.warning("retrying %s attempt=%s code=%s delay=%.3f", description, attempt, code, delay)
             time.sleep(delay)
             attempt += 1
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in inventory_reservation.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in inventory_reservation.py", MAX_RETRIES)
 def decrement_stock(sku: str, warehouse_id: str, quantity: int, version: int) -> bool:
     table = dynamodb.Table(INVENTORY_TABLE)
 

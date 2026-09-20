@@ -18,7 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
-from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS, MAX_RETRIES, MAX_BACKOFF_SECONDS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -128,7 +128,7 @@ def submit_invalidation(distribution_id: str, patterns: List[str]) -> Optional[s
     """Submit the invalidation batch, retrying while CloudFront is saturated."""
     caller_reference = "s3-media-{}".format(uuid.uuid4().hex)
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             response = cloudfront.create_invalidation(
                 DistributionId=distribution_id,
@@ -143,7 +143,7 @@ def submit_invalidation(distribution_id: str, patterns: List[str]) -> Optional[s
             if code not in RETRYABLE_ERRORS:
                 logger.error("invalidation rejected (%s): %s", code, exc)
                 return None
-            delay = BACKOFF_BASE_SECONDS * (2 ** attempt)
+            delay = min(BACKOFF_BASE_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS)
             logger.warning(
                 "cloudfront busy (%s), attempt=%s retrying in %.1fs", code, attempt, delay
             )
@@ -152,7 +152,7 @@ def submit_invalidation(distribution_id: str, patterns: List[str]) -> Optional[s
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in cdn_cache_invalidator.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in cdn_cache_invalidator.py", MAX_RETRIES)
 def summarise(keys: List[str], patterns: List[str]) -> Dict[str, Any]:
     exact = sum(1 for pattern in patterns if not pattern.endswith("*"))
     return {

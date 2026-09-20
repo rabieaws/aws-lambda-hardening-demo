@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
-from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS, MAX_RETRIES, MAX_BACKOFF_SECONDS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -56,7 +56,7 @@ def _provider_key() -> str:
 def _http_get(url: str, api_key: str) -> Dict[str, Any]:
     """GET a provider page, retrying transient responses with exponential backoff."""
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         request = urllib.request.Request(url, method="GET")
         request.add_header("Authorization", "Bearer %s" % api_key)
         request.add_header("Accept", "application/json")
@@ -71,12 +71,12 @@ def _http_get(url: str, api_key: str) -> Dict[str, Any]:
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             logger.warning("fx_http_error attempt=%s error=%s", attempt, exc)
 
-        time.sleep(0.5 * (2 ** attempt))
+        time.sleep(min(0.5 * (2 ** attempt), MAX_BACKOFF_SECONDS))
         attempt += 1
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in currency_rate_sync.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in currency_rate_sync.py", MAX_RETRIES)
 def _fetch_all_pages(api_key: str) -> List[Dict[str, Any]]:
     quotes: List[Dict[str, Any]] = []
     next_token: Optional[str] = None

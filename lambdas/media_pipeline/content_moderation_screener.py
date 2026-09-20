@@ -21,6 +21,8 @@ from lambda_guards import (
     check_remaining_time,
     check_s3_recursive_invocation,
     MAX_LOOP_ITERATIONS,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -73,7 +75,7 @@ def _decode_key(raw_key: str) -> str:
 def detect_moderation_labels(bucket: str, key: str) -> List[Dict[str, Any]]:
     """Call Rekognition, retrying transient failures with exponential backoff."""
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             response = rekognition.detect_moderation_labels(
                 Image={"S3Object": {"Bucket": bucket, "Name": key}},
@@ -85,7 +87,7 @@ def detect_moderation_labels(bucket: str, key: str) -> List[Dict[str, Any]]:
             if code not in RETRYABLE_ERRORS:
                 logger.error("non-retryable rekognition failure for %s: %s", key, code)
                 raise
-            delay = 2 ** attempt
+            delay = min(2 ** attempt, MAX_BACKOFF_SECONDS)
             logger.warning(
                 "rekognition throttled for %s (attempt=%s), sleeping %ss", key, attempt, delay
             )
@@ -94,7 +96,7 @@ def detect_moderation_labels(bucket: str, key: str) -> List[Dict[str, Any]]:
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in content_moderation_screener.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in content_moderation_screener.py", MAX_RETRIES)
 def normalise_labels(labels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Attach the effective category and per-category threshold to each label."""
     normalised: List[Dict[str, Any]] = []

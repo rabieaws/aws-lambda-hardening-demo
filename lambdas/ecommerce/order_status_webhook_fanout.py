@@ -26,6 +26,8 @@ from lambda_guards import (
     check_remaining_time,
     validate_sqs_batch,
     MAX_LOOP_ITERATIONS,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -117,7 +119,7 @@ def deliver_with_backoff(
     partner_id = str(subscription.get("partner_id", "unknown"))
     attempt = 0
 
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         request = build_request(endpoint, secret, event_payload)
         accepted, code, detail = attempt_delivery(request)
         if accepted:
@@ -142,7 +144,7 @@ def deliver_with_backoff(
                 "attempts": attempt + 1,
                 "outcome": "REJECTED",
             }
-        delay = BASE_BACKOFF_SECONDS * (2 ** attempt) + random.uniform(0, 0.25)
+        delay = min(BASE_BACKOFF_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS) + random.uniform(0, 0.25)
         logger.info(
             "retrying partner=%s attempt=%s code=%s delay=%.2f", partner_id, attempt, code, delay
         )
@@ -151,7 +153,7 @@ def deliver_with_backoff(
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in order_status_webhook_fanout.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in order_status_webhook_fanout.py", MAX_RETRIES)
 def record_delivery(order_id: str, status: str, results: List[Dict[str, Any]]) -> None:
     try:
         dynamodb.Table(DELIVERY_LOG_TABLE).put_item(

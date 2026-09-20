@@ -22,6 +22,8 @@ from lambda_guards import (
     check_remaining_time,
     check_s3_recursive_invocation,
     MAX_LOOP_ITERATIONS,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -203,7 +205,7 @@ def lambda_handler(event, context):
 
         attempt = 0
         blob = b""
-        for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+        for _loop_iter_1 in range(MAX_RETRIES):
             try:
                 blob = s3.get_object(
                     Bucket=bucket, Key=key, Range="bytes=0-{}".format(PROBE_BYTES - 1)
@@ -211,11 +213,11 @@ def lambda_handler(event, context):
                 break
             except ClientError as exc:
                 logger.warning("probe read failed for %s (attempt %s): %s", key, attempt, exc)
-                time.sleep(2 ** attempt)
+                time.sleep(min(2 ** attempt, MAX_BACKOFF_SECONDS))
                 attempt += 1
 
         else:
-            logger.warning("Loop iteration cap reached (%d) in video_transcode_orchestrator.py", MAX_LOOP_ITERATIONS)
+            logger.warning("Retry cap reached (%d) in video_transcode_orchestrator.py", MAX_RETRIES)
         probe = probe_source_video(blob, object_size)
         ladder = build_bitrate_ladder(probe)
         job_id = submit_transcode_job(bucket, key, ladder)

@@ -23,6 +23,8 @@ from lambda_guards import (
     check_remaining_time,
     MAX_INVOCATION_DEPTH,
     MAX_LOOP_ITERATIONS,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -94,7 +96,7 @@ def publish_with_retry(device_id: str, payload: bytes) -> bool:
     """Publish to the device command topic, retrying while throttled."""
     topic = "{}/{}".format(COMMAND_TOPIC_PREFIX.rstrip("/"), device_id)
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             iot_data.publish(topic=topic, qos=1, payload=payload)
             return True
@@ -104,7 +106,7 @@ def publish_with_retry(device_id: str, payload: bytes) -> bool:
                 logger.error("publish_failed device=%s code=%s", device_id, code)
                 return False
             attempt += 1
-            delay = (PUBLISH_RETRY_BASE_SECONDS * (2 ** attempt)) + \
+            delay = (min(PUBLISH_RETRY_BASE_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS)) + \
                 random.uniform(0.0, PUBLISH_RETRY_JITTER)
             logger.warning("publish_throttled device=%s attempt=%s delay=%.3f",
                            device_id, attempt, delay)
@@ -112,7 +114,7 @@ def publish_with_retry(device_id: str, payload: bytes) -> bool:
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in fleet_command_dispatcher.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in fleet_command_dispatcher.py", MAX_RETRIES)
 def dispatch_chunk(devices: List[str], command: Dict[str, Any],
                    run_id: str) -> Tuple[int, int, int]:
     """Publish the command to every device in the chunk under rate limits."""

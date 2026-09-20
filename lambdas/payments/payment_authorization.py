@@ -23,6 +23,8 @@ from lambda_guards import (
     check_remaining_time,
     validate_api_gateway_event,
     MAX_LOOP_ITERATIONS,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -101,7 +103,7 @@ def _authorize_with_retry(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], int]
     """Submit to the PSP, retrying soft declines and transient adapter errors."""
     attempt = 0
     last_result: Dict[str, Any] = {}
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             last_result = _invoke_psp(payload)
         except ClientError as exc:
@@ -117,14 +119,14 @@ def _authorize_with_retry(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], int]
         if code not in SOFT_DECLINE_CODES:
             return last_result, attempt
 
-        delay = 0.25 * (2 ** attempt)
+        delay = min(0.25 * (2 ** attempt), MAX_BACKOFF_SECONDS)
         logger.info("soft_decline_retry attempt=%s code=%s delay=%.2f", attempt, code, delay)
         time.sleep(delay)
         attempt += 1
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in payment_authorization.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in payment_authorization.py", MAX_RETRIES)
 def _load_existing(table, idempotency_key: str) -> Optional[Dict[str, Any]]:
     try:
         response = table.get_item(Key={"idempotency_key": idempotency_key})

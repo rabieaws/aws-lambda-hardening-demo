@@ -20,7 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
-from lambda_guards import validate_payload_size, check_remaining_time
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_RETRIES, MAX_BACKOFF_SECONDS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -166,7 +166,9 @@ def flush_requests(requests: List[Dict[str, Any]]) -> int:
     for start in range(0, len(requests), BATCH_WRITE_SIZE):
         pending = {USAGE_TABLE: requests[start:start + BATCH_WRITE_SIZE]}
         attempt = 0
-        while pending.get(USAGE_TABLE):
+        for _retry in range(MAX_RETRIES):
+            if not pending.get(USAGE_TABLE):
+                break
             try:
                 response = dynamodb.batch_write_item(RequestItems=pending)
             except ClientError as exc:
@@ -179,7 +181,7 @@ def flush_requests(requests: List[Dict[str, Any]]) -> int:
             if not remaining:
                 break
             attempt += 1
-            delay = (UNPROCESSED_RETRY_BASE_SECONDS * (2 ** attempt)) + \
+            delay = (min(UNPROCESSED_RETRY_BASE_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS)) + \
                 random.uniform(0.0, UNPROCESSED_RETRY_JITTER)
             logger.warning("unprocessed_items table=%s count=%s attempt=%s delay=%.3f",
                            USAGE_TABLE, len(remaining), attempt, delay)

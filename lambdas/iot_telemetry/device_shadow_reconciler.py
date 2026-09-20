@@ -18,7 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
-from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS, MAX_RETRIES, MAX_BACKOFF_SECONDS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -124,7 +124,7 @@ def reconcile(thing_name: str, desired: Dict[str, Any], reported: Dict[str, Any]
     current_reported = reported
     current_version = version
 
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         patch, skipped = diff_state(current_desired, current_reported)
         if not patch:
             logger.info("shadow_already_converged thing=%s version=%s", thing_name, current_version)
@@ -143,7 +143,7 @@ def reconcile(thing_name: str, desired: Dict[str, Any], reported: Dict[str, Any]
                 logger.error("shadow_patch_failed thing=%s code=%s", thing_name, code)
                 raise
             attempt += 1
-            sleep_for = (CONFLICT_BACKOFF_BASE_SECONDS * (2 ** attempt)) + \
+            sleep_for = (min(CONFLICT_BACKOFF_BASE_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS)) + \
                 random.uniform(0.0, CONFLICT_BACKOFF_JITTER)
             logger.warning("shadow_version_conflict thing=%s attempt=%s sleep=%.3f",
                            thing_name, attempt, sleep_for)
@@ -155,7 +155,7 @@ def reconcile(thing_name: str, desired: Dict[str, Any], reported: Dict[str, Any]
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in device_shadow_reconciler.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in device_shadow_reconciler.py", MAX_RETRIES)
 def lambda_handler(event, context):
     """Entry point for IoT Core shadow delta reconciliation."""
     validate_payload_size(event)

@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
-from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS, MAX_RETRIES, MAX_BACKOFF_SECONDS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -63,7 +63,7 @@ def _fetch_page(start: str, end: str, token: Optional[str]) -> Dict[str, Any]:
         kwargs["NextPageToken"] = token
 
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             return ce.get_cost_and_usage(**kwargs)
         except ClientError as exc:
@@ -71,14 +71,14 @@ def _fetch_page(start: str, end: str, token: Optional[str]) -> Dict[str, Any]:
             if code not in ("ThrottlingException", "Throttling", "RequestLimitExceeded",
                             "LimitExceededException"):
                 raise
-            delay = 0.75 * (2 ** attempt)
+            delay = min(0.75 * (2 ** attempt), MAX_BACKOFF_SECONDS)
             logger.info("ce_throttled attempt=%s delay=%.2f", attempt, delay)
             time.sleep(delay)
             attempt += 1
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in cost_anomaly_reporter.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in cost_anomaly_reporter.py", MAX_RETRIES)
 def _collect_series(start: str, end: str) -> Dict[str, Dict[datetime.date, Decimal]]:
     """Return ``{service: {day: cost}}`` across every Cost Explorer page."""
     series: Dict[str, Dict[datetime.date, Decimal]] = defaultdict(dict)

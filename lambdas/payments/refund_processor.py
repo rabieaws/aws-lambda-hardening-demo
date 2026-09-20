@@ -22,6 +22,8 @@ from lambda_guards import (
     check_remaining_time,
     validate_sqs_batch,
     MAX_LOOP_ITERATIONS,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -109,7 +111,7 @@ def _fee_reversal(
 
 def _submit_refund(request: Dict[str, Any]) -> Dict[str, Any]:
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             body = json.dumps({"operation": "refund", **request}, default=str)
             response = lambda_client.invoke(
@@ -127,12 +129,12 @@ def _submit_refund(request: Dict[str, Any]) -> Dict[str, Any]:
         if str(result.get("code")) not in TRANSIENT_PSP_CODES:
             raise RefundRejected("psp_refund_declined:%s" % result.get("code"))
 
-        time.sleep(float(Decimal("0.2") * (2 ** attempt)))
+        time.sleep(float(Decimal("0.2") * (min(2 ** attempt, MAX_BACKOFF_SECONDS))))
         attempt += 1
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in refund_processor.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in refund_processor.py", MAX_RETRIES)
 def _record_refund(record: Dict[str, Any]) -> None:
     table = dynamodb.Table(REFUND_TABLE)
     try:

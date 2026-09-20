@@ -22,6 +22,8 @@ from lambda_guards import (
     check_remaining_time,
     MAX_LOOP_ITERATIONS,
     MAX_PAGINATION_PAGES,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -88,13 +90,13 @@ def _load_key_state(key_id: str) -> Dict[str, Any]:
     """Read persisted rotation state, riding out throughput pressure on the table."""
     table = dynamodb.Table(KEY_STATE_TABLE)
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             return table.get_item(Key={"key_id": key_id}).get("Item") or {}
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") not in RETRYABLE_ERRORS:
                 raise
-            delay = RETRY_BASE_SECONDS * (2 ** attempt)
+            delay = min(RETRY_BASE_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS)
             logger.warning("key_state_read_retry key=%s attempt=%s delay=%.2f",
                            key_id, attempt, delay)
             time.sleep(delay)
@@ -102,7 +104,7 @@ def _load_key_state(key_id: str) -> Dict[str, Any]:
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in api_key_rotation_worker.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in api_key_rotation_worker.py", MAX_RETRIES)
 def _usage_calls(key_id: str, now: int) -> int:
     start = time.strftime("%Y-%m-%d", time.gmtime(now - 30 * SECONDS_PER_DAY))
     end = time.strftime("%Y-%m-%d", time.gmtime(now))
@@ -144,7 +146,7 @@ def _rotation_urgency(age_days: float, idle_days: float, calls: int,
 def _create_successor(key: Dict[str, Any]) -> Dict[str, Any]:
     suffix = secrets.token_hex(4)
     attempt = 0
-    for _loop_iter_2 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_2 in range(MAX_RETRIES):
         try:
             created = apigateway.create_api_key(
                 name="{0}-r{1}".format(str(key.get("name", "key"))[:40], suffix),
@@ -158,7 +160,7 @@ def _create_successor(key: Dict[str, Any]) -> Dict[str, Any]:
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") not in RETRYABLE_ERRORS:
                 raise
-            delay = RETRY_BASE_SECONDS * (2 ** attempt)
+            delay = min(RETRY_BASE_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS)
             logger.warning("successor_create_retry key=%s attempt=%s delay=%.2f",
                            key.get("id"), attempt, delay)
             time.sleep(delay)
@@ -166,7 +168,7 @@ def _create_successor(key: Dict[str, Any]) -> Dict[str, Any]:
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in api_key_rotation_worker.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in api_key_rotation_worker.py", MAX_RETRIES)
 def _schedule_revocation(key_id: str, successor_id: str, revoke_at: int, urgency: int,
                          now: int) -> None:
     events.put_events(Entries=[{

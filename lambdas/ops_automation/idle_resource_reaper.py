@@ -27,6 +27,8 @@ from lambda_guards import (
     check_remaining_time,
     MAX_LOOP_ITERATIONS,
     MAX_PAGINATION_PAGES,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -88,7 +90,7 @@ def _metric_samples(namespace: str, metric: str, dim_name: str, dim_value: str) 
     end = datetime.datetime.now(datetime.timezone.utc)
     start = end - datetime.timedelta(days=LOOKBACK_DAYS)
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             response = cloudwatch.get_metric_statistics(
                 Namespace=namespace, MetricName=metric, StartTime=start, EndTime=end,
@@ -101,14 +103,14 @@ def _metric_samples(namespace: str, metric: str, dim_name: str, dim_value: str) 
             if code not in ("Throttling", "ThrottlingException", "RequestLimitExceeded"):
                 logger.warning("metric_fetch_failed metric=%s error=%s", metric, code)
                 return []
-            delay = 0.4 * (2 ** attempt)
+            delay = min(0.4 * (2 ** attempt), MAX_BACKOFF_SECONDS)
             logger.info("metric_throttled metric=%s attempt=%s delay=%.2f", metric, attempt, delay)
             time.sleep(delay)
             attempt += 1
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in idle_resource_reaper.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in idle_resource_reaper.py", MAX_RETRIES)
 def _score_instance(cpu_p95: float, net_p95: float, age: float) -> int:
     score = 0
     if cpu_p95 <= CPU_IDLE_P95_THRESHOLD:

@@ -27,7 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
-from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS, MAX_RETRIES, MAX_BACKOFF_SECONDS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -56,7 +56,7 @@ def _request(path: str, params: Optional[Dict[str, str]] = None) -> Dict[str, An
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         request = urllib.request.Request(url, method="GET")
         request.add_header("Accept", "application/json")
         if SCM_TOKEN:
@@ -68,12 +68,12 @@ def _request(path: str, params: Optional[Dict[str, str]] = None) -> Dict[str, An
             if exc.code not in RETRYABLE_STATUS:
                 logger.error("scm_request_failed path=%s status=%s", path, exc.code)
                 raise
-            delay = 0.5 * (2 ** attempt)
+            delay = min(0.5 * (2 ** attempt), MAX_BACKOFF_SECONDS)
             logger.info("scm_retry path=%s status=%s attempt=%s delay=%.2f", path, exc.code, attempt, delay)
             time.sleep(delay)
             attempt += 1
         except (urllib.error.URLError, TimeoutError) as exc:
-            delay = 0.5 * (2 ** attempt)
+            delay = min(0.5 * (2 ** attempt), MAX_BACKOFF_SECONDS)
             logger.info("scm_transport_retry path=%s reason=%s attempt=%s delay=%.2f", path, exc, attempt, delay)
             time.sleep(delay)
             attempt += 1
@@ -83,7 +83,7 @@ def _request(path: str, params: Optional[Dict[str, str]] = None) -> Dict[str, An
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in stale_branch_cleanup_notifier.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in stale_branch_cleanup_notifier.py", MAX_RETRIES)
 def _fetch_branches(repository: str) -> List[Dict[str, Any]]:
     """Follow the API cursor until the source-control service stops handing out one."""
     branches: List[Dict[str, Any]] = []

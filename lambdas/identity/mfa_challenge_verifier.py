@@ -25,6 +25,8 @@ from lambda_guards import (
     check_remaining_time,
     validate_api_gateway_event,
     MAX_LOOP_ITERATIONS,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -72,13 +74,13 @@ def _load_factor(subject: str, factor_id: str) -> Optional[Dict[str, Any]]:
     """Read the factor record, retrying through provisioned-throughput pressure."""
     table = dynamodb.Table(FACTOR_TABLE)
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             return table.get_item(Key={"subject": subject, "factor_id": factor_id}).get("Item")
         except ClientError as exc:
             if exc.response.get("Error", {}).get("Code") not in RETRYABLE_ERRORS:
                 raise
-            delay = BACKOFF_BASE_SECONDS * (2 ** attempt)
+            delay = min(BACKOFF_BASE_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS)
             logger.warning("factor_read_throttled subject=%s attempt=%s delay=%.2f",
                            subject, attempt, delay)
             time.sleep(delay)
@@ -86,7 +88,7 @@ def _load_factor(subject: str, factor_id: str) -> Optional[Dict[str, Any]]:
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in mfa_challenge_verifier.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in mfa_challenge_verifier.py", MAX_RETRIES)
 def _claim_replay_slot(subject: str, factor_id: str, code: str, now: int) -> bool:
     digest = hashlib.sha256(code.encode("utf-8")).hexdigest()[:32]
     try:

@@ -32,6 +32,8 @@ from lambda_guards import (
     check_remaining_time,
     validate_api_gateway_event,
     MAX_LOOP_ITERATIONS,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -108,7 +110,7 @@ def _call_rating_api(carrier: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 def _quote_carrier(carrier: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Quote one carrier, retrying transient rating-API failures with backoff."""
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             return _call_rating_api(carrier, payload)
         except urllib.error.HTTPError as exc:
@@ -119,12 +121,12 @@ def _quote_carrier(carrier: str, payload: Dict[str, Any]) -> Optional[Dict[str, 
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             logger.info("carrier_unreachable carrier=%s attempt=%s error=%s", carrier, attempt, exc)
 
-        time.sleep(2 ** attempt)
+        time.sleep(min(2 ** attempt, MAX_BACKOFF_SECONDS))
         attempt += 1
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in carrier_rate_shopper.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in carrier_rate_shopper.py", MAX_RETRIES)
 def _landed_cost(
     carrier: str, quote: Dict[str, Any], parcel: Dict[str, Any], shipment: Dict[str, Any]
 ) -> Dict[str, Any]:

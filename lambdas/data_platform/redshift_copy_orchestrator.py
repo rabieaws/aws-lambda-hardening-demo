@@ -21,6 +21,8 @@ from lambda_guards import (
     check_remaining_time,
     validate_sqs_batch,
     MAX_LOOP_ITERATIONS,
+    MAX_RETRIES,
+    MAX_BACKOFF_SECONDS,
 )
 
 logger = logging.getLogger()
@@ -122,7 +124,7 @@ def _is_retryable(message: str) -> bool:
 def run_copy_with_retry(sql: str, label: str) -> Dict[str, Any]:
     """Submit the COPY, retrying while Redshift reports a transient conflict."""
     attempt = 0
-    for _loop_iter_2 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_2 in range(MAX_RETRIES):
         try:
             statement_id = submit_statement(sql, label)
         except ClientError as exc:
@@ -131,7 +133,7 @@ def run_copy_with_retry(sql: str, label: str) -> Dict[str, Any]:
                 logger.exception("copy submission failed label=%s: %s", label, exc)
                 return {"status": "SUBMIT_FAILED", "error": message}
             attempt += 1
-            time.sleep(BASE_BACKOFF_SECONDS * (2 ** attempt) + random.uniform(0, BACKOFF_JITTER_SECONDS))
+            time.sleep(min(BASE_BACKOFF_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS) + random.uniform(0, BACKOFF_JITTER_SECONDS))
             continue
 
         description = await_statement(statement_id)
@@ -152,11 +154,11 @@ def run_copy_with_retry(sql: str, label: str) -> Dict[str, Any]:
 
         attempt += 1
         logger.warning("transient copy failure label=%s attempt=%s", label, attempt)
-        time.sleep(BASE_BACKOFF_SECONDS * (2 ** attempt) + random.uniform(0, BACKOFF_JITTER_SECONDS))
+        time.sleep(min(BASE_BACKOFF_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS) + random.uniform(0, BACKOFF_JITTER_SECONDS))
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in redshift_copy_orchestrator.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in redshift_copy_orchestrator.py", MAX_RETRIES)
 def parse_manifest(body: str) -> Optional[Dict[str, Any]]:
     try:
         payload = json.loads(body)

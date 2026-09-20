@@ -22,7 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
-from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS, MAX_RETRIES, MAX_BACKOFF_SECONDS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -116,7 +116,7 @@ def emit_coefficients(sensor_id: str, gain: float, offset: float, fit: Dict[str,
     """Conditionally publish new coefficients, retrying on revision conflicts."""
     table = dynamodb.Table(COEFFICIENT_TABLE)
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             current = table.get_item(Key={"sensor_id": sensor_id}).get("Item") or {}
             revision = int(current.get("revision", 0))
@@ -143,7 +143,7 @@ def emit_coefficients(sensor_id: str, gain: float, offset: float, fit: Dict[str,
                 logger.error("coefficient_write_failed sensor=%s code=%s", sensor_id, code)
                 return False
             attempt += 1
-            delay = (RETRY_BASE_SECONDS * (2 ** attempt)) + \
+            delay = (min(RETRY_BASE_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS)) + \
                 random.uniform(0.0, RETRY_JITTER_SECONDS)
             logger.warning("coefficient_revision_conflict sensor=%s attempt=%s delay=%.3f",
                            sensor_id, attempt, delay)
@@ -151,7 +151,7 @@ def emit_coefficients(sensor_id: str, gain: float, offset: float, fit: Dict[str,
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in sensor_calibration_drift.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in sensor_calibration_drift.py", MAX_RETRIES)
 def lambda_handler(event, context):
     """Entry point for the Kinesis calibration drift stream."""
     validate_payload_size(event)

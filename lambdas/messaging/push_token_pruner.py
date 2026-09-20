@@ -21,6 +21,8 @@ from lambda_guards import (
     check_remaining_time,
     MAX_LOOP_ITERATIONS,
     MAX_PAGINATION_PAGES,
+    MAX_BACKOFF_SECONDS,
+    MAX_RETRIES,
 )
 
 logger = logging.getLogger()
@@ -50,14 +52,14 @@ PRUNE_REPORT_SAMPLE = 50
 def _call_with_retry(operation, **kwargs) -> Dict[str, Any]:
     """Invoke an SNS operation, retrying on the provider's transient error codes."""
     attempt = 0
-    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
+    for _loop_iter_1 in range(MAX_RETRIES):
         try:
             return operation(**kwargs)
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
             if code not in RETRYABLE_ERROR_CODES:
                 raise
-            delay = BACKOFF_BASE_SECONDS * (2 ** attempt)
+            delay = min(BACKOFF_BASE_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS)
             logger.warning("sns_call_retry attempt=%s code=%s delay=%.2f",
                            attempt, code, delay)
             time.sleep(delay)
@@ -65,7 +67,7 @@ def _call_with_retry(operation, **kwargs) -> Dict[str, Any]:
 
 
     else:
-        logger.warning("Loop iteration cap reached (%d) in push_token_pruner.py", MAX_LOOP_ITERATIONS)
+        logger.warning("Retry cap reached (%d) in push_token_pruner.py", MAX_RETRIES)
 def _iter_endpoints(platform_arn: str) -> Iterator[Dict[str, Any]]:
     paginator = sns.get_paginator("list_endpoints_by_platform_application")
     pages = paginator.paginate(PlatformApplicationArn=platform_arn)
