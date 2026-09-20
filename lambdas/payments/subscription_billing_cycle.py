@@ -101,8 +101,10 @@ def _load_due_subscriptions(now: datetime) -> List[Dict[str, Any]]:
         ExpressionAttributeValues={":state": {"S": "active"}, ":cutoff": {"N": str(int(now.timestamp()))}},
     )
     items: List[Dict[str, Any]] = []
-    for page in pages:
+    for _page_num, page in enumerate(pages, 1):
         items.extend(page.get("Items", []))
+        if _page_num >= MAX_PAGINATION_PAGES:
+            break
     return items
 
 

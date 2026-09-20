@@ -79,8 +79,10 @@ def _query_internal(psp_reference: str) -> List[Dict[str, Any]]:
         ExpressionAttributeValues={":ref": {"S": psp_reference}},
     )
     items: List[Dict[str, Any]] = []
-    for page in pages:
+    for _page_num, page in enumerate(pages, 1):
         items.extend(page.get("Items", []))
+        if _page_num >= MAX_PAGINATION_PAGES:
+            break
     return items
 
 
