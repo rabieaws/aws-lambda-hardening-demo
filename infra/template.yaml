@@ -1,0 +1,322 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Commerce and payments Lambda stack (ecommerce + payments domains)
+
+Globals:
+  Function:
+    Runtime: python3.11
+    MemorySize: 512
+    Architectures:
+      - x86_64
+    Environment:
+      Variables:
+        LOG_LEVEL: INFO
+        POWERTOOLS_SERVICE_NAME: commerce
+
+Parameters:
+  Stage:
+    Type: String
+    Default: prod
+    AllowedValues: [dev, staging, prod]
+
+Resources:
+
+  CommerceApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      EndpointConfiguration:
+        Type: REGIONAL
+
+  # ---------------------------------------------------------------- ecommerce
+
+  CheckoutOrderSubmitFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/ecommerce
+      Handler: checkout_order_submit.lambda_handler
+      Environment:
+        Variables:
+          ORDER_TABLE: !Sub 'orders-${Stage}'
+          IDEMPOTENCY_TABLE: !Sub 'order-idempotency-${Stage}'
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CommerceApi
+            Path: /orders
+            Method: post
+
+  CartMergeOnLoginFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/ecommerce
+      Handler: cart_merge_on_login.lambda_handler
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CommerceApi
+            Path: /carts/merge
+            Method: post
+
+  InventoryReservationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/ecommerce
+      Handler: inventory_reservation.lambda_handler
+      Timeout: 900
+
+  PriceRecalculationStreamFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/ecommerce
+      Handler: price_recalculation_stream.lambda_handler
+      Events:
+        PriceStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/prices-${Stage}/stream/latest'
+            StartingPosition: LATEST
+            BatchSize: 500
+
+  ProductSearchFacetsFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/ecommerce
+      Handler: product_search_facets.lambda_handler
+      Events:
+        Get:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CommerceApi
+            Path: /products/search
+            Method: get
+
+  AbandonedCartSweeperFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/ecommerce
+      Handler: abandoned_cart_sweeper.lambda_handler
+      Timeout: 900
+      Events:
+        Schedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(30 minutes)
+
+  OrderStatusWebhookFanoutFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/ecommerce
+      Handler: order_status_webhook_fanout.lambda_handler
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt OrderStatusQueue.Arn
+            BatchSize: 10
+
+  ReviewModerationPipelineFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/ecommerce
+      Handler: review_moderation_pipeline.lambda_handler
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt ReviewModerationQueue.Arn
+            BatchSize: 10
+
+  LoyaltyPointsLedgerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/ecommerce
+      Handler: loyalty_points_ledger.lambda_handler
+      Events:
+        LoyaltyStream:
+          Type: DynamoDB
+          Properties:
+            Stream: !Sub 'arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/loyalty-${Stage}/stream/latest'
+            StartingPosition: LATEST
+            BatchSize: 1000
+
+  ReturnRefundEligibilityFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/ecommerce
+      Handler: return_refund_eligibility.lambda_handler
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CommerceApi
+            Path: /returns/eligibility
+            Method: post
+
+  # ----------------------------------------------------------------- payments
+
+  PaymentAuthorizationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/payments
+      Handler: payment_authorization.lambda_handler
+      Environment:
+        Variables:
+          AUTH_TABLE: !Sub 'payment-authorizations-${Stage}'
+          PSP_ADAPTER_FUNCTION: !Sub 'psp-adapter-${Stage}'
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CommerceApi
+            Path: /payments/authorizations
+            Method: post
+
+  PaymentCaptureWorkerFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/payments
+      Handler: payment_capture_worker.lambda_handler
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt PaymentCaptureQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  RefundProcessorFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/payments
+      Handler: refund_processor.lambda_handler
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt RefundQueue.Arn
+            BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+
+  LedgerDoubleEntryPosterFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/payments
+      Handler: ledger_double_entry_poster.lambda_handler
+
+  SettlementReconciliationFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/payments
+      Handler: settlement_reconciliation.lambda_handler
+      Timeout: 900
+      Events:
+        SettlementUpload:
+          Type: S3
+          Properties:
+            Bucket: !Ref SettlementBucket
+            Events: s3:ObjectCreated:*
+
+  ChargebackDisputeIntakeFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/payments
+      Handler: chargeback_dispute_intake.lambda_handler
+      Events:
+        Post:
+          Type: Api
+          Properties:
+            RestApiId: !Ref CommerceApi
+            Path: /payments/disputes
+            Method: post
+
+  FraudRiskScoringFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/payments
+      Handler: fraud_risk_scoring.lambda_handler
+      MemorySize: 1024
+
+  SubscriptionBillingCycleFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/payments
+      Handler: subscription_billing_cycle.lambda_handler
+      Timeout: 900
+      Events:
+        Schedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(1 hour)
+
+  PayoutBatchDispatcherFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/payments
+      Handler: payout_batch_dispatcher.lambda_handler
+      Environment:
+        Variables:
+          PAYOUT_QUEUE_URL: !Ref PayoutQueue
+      Events:
+        Queue:
+          Type: SQS
+          Properties:
+            Queue: !GetAtt PayoutQueue.Arn
+            BatchSize: 10
+
+  CurrencyRateSyncFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      CodeUri: ../lambdas/payments
+      Handler: currency_rate_sync.lambda_handler
+      Events:
+        Schedule:
+          Type: Schedule
+          Properties:
+            Schedule: rate(15 minutes)
+
+  # -------------------------------------------------------------- event infra
+
+  OrderStatusQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'order-status-fanout-${Stage}'
+      VisibilityTimeout: 300
+
+  ReviewModerationQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'review-moderation-${Stage}'
+      VisibilityTimeout: 300
+
+  PaymentCaptureQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'payment-capture-requests-${Stage}'
+      VisibilityTimeout: 300
+
+  RefundQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'payment-refund-requests-${Stage}'
+      VisibilityTimeout: 300
+
+  PayoutQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'payment-payout-requests-${Stage}'
+      VisibilityTimeout: 300
+
+  SettlementBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub 'settlement-landing-${Stage}-${AWS::AccountId}'
+
+Outputs:
+  ApiEndpoint:
+    Description: Commerce API base URL
+    Value: !Sub 'https://${CommerceApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}'
