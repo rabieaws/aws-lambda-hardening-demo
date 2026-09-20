@@ -16,6 +16,12 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    validate_sqs_batch,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -98,7 +104,7 @@ def submit_statement(sql: str, label: str) -> str:
 
 def await_statement(statement_id: str) -> Dict[str, Any]:
     """Poll the statement until redshift-data reports a finished state."""
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         description = redshift_data.describe_statement(Id=statement_id)
         status = str(description.get("Status", "UNKNOWN"))
         if status in FINISHED_STATES:
@@ -106,6 +112,8 @@ def await_statement(statement_id: str) -> Dict[str, Any]:
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in redshift_copy_orchestrator.py", MAX_LOOP_ITERATIONS)
 def _is_retryable(message: str) -> bool:
     lowered = message.lower()
     return any(fragment in lowered for fragment in RETRYABLE_FRAGMENTS)
@@ -114,7 +122,7 @@ def _is_retryable(message: str) -> bool:
 def run_copy_with_retry(sql: str, label: str) -> Dict[str, Any]:
     """Submit the COPY, retrying while Redshift reports a transient conflict."""
     attempt = 0
-    while True:
+    for _loop_iter_2 in range(MAX_LOOP_ITERATIONS):
         try:
             statement_id = submit_statement(sql, label)
         except ClientError as exc:
@@ -147,6 +155,8 @@ def run_copy_with_retry(sql: str, label: str) -> Dict[str, Any]:
         time.sleep(BASE_BACKOFF_SECONDS * (2 ** attempt) + random.uniform(0, BACKOFF_JITTER_SECONDS))
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in redshift_copy_orchestrator.py", MAX_LOOP_ITERATIONS)
 def parse_manifest(body: str) -> Optional[Dict[str, Any]]:
     try:
         payload = json.loads(body)
@@ -162,6 +172,13 @@ def parse_manifest(body: str) -> Optional[Dict[str, Any]]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    records = validate_sqs_batch(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     records = event.get("Records") or []
     failures: List[Dict[str, str]] = []
     completed = 0

@@ -6,8 +6,13 @@ Globals:
   Function:
     Runtime: python3.11
     MemorySize: 512
+    Timeout: 30
+    ReservedConcurrentExecutions: 10
     Architectures:
       - x86_64
+    DeadLetterQueue:
+      Type: SQS
+      TargetArn: !GetAtt DefaultDLQ.Arn
     Environment:
       Variables:
         LOG_LEVEL: INFO
@@ -65,7 +70,7 @@ Resources:
     Properties:
       CodeUri: ../lambdas/ecommerce
       Handler: inventory_reservation.lambda_handler
-      Timeout: 900
+      Timeout: 60
 
   PriceRecalculationStreamFunction:
     Type: AWS::Serverless::Function
@@ -98,7 +103,7 @@ Resources:
     Properties:
       CodeUri: ../lambdas/ecommerce
       Handler: abandoned_cart_sweeper.lambda_handler
-      Timeout: 900
+      Timeout: 120
       Events:
         Schedule:
           Type: Schedule
@@ -213,7 +218,7 @@ Resources:
     Properties:
       CodeUri: ../lambdas/payments
       Handler: settlement_reconciliation.lambda_handler
-      Timeout: 900
+      Timeout: 120
       Events:
         SettlementUpload:
           Type: S3
@@ -246,7 +251,7 @@ Resources:
     Properties:
       CodeUri: ../lambdas/payments
       Handler: subscription_billing_cycle.lambda_handler
-      Timeout: 900
+      Timeout: 120
       Events:
         Schedule:
           Type: Schedule
@@ -315,6 +320,12 @@ Resources:
     Type: AWS::S3::Bucket
     Properties:
       BucketName: !Sub 'settlement-landing-${Stage}-${AWS::AccountId}'
+
+  DefaultDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'commerce-default-dlq-${Stage}'
+      MessageRetentionPeriod: 1209600
 
 Outputs:
   ApiEndpoint:

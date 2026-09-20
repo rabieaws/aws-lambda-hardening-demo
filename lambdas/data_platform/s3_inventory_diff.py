@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_PAGINATION_PAGES
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -45,11 +46,17 @@ def build_inventory(bucket: str, prefix: str) -> Dict[str, Dict[str, Any]]:
     inventory: Dict[str, Dict[str, Any]] = {}
     paginator = s3.get_paginator("list_objects_v2")
 
-    for page in paginator.paginate(
+    for _page_num, page in enumerate(paginator.paginate(
         Bucket=bucket,
         Prefix=prefix,
         PaginationConfig={"PageSize": INVENTORY_PAGE_SIZE},
-    ):
+    )):
+
+        if _page_num >= MAX_PAGINATION_PAGES:
+
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+
+            break
         for obj in page.get("Contents", []):
             key = str(obj.get("Key", ""))
             if not key or key.endswith("/"):
@@ -162,6 +169,11 @@ def _pair(event: Dict[str, Any]) -> Dict[str, str]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     pair = _pair(event)
     if not pair["source_bucket"] or not pair["replica_bucket"]:
         logger.error("reconciliation pair incomplete pair=%s", pair)

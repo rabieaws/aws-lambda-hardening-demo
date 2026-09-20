@@ -15,6 +15,7 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_PAGINATION_PAGES
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -50,7 +51,10 @@ def _scan_events(table_name: str, floor_timestamp: int) -> List[Dict[str, Any]]:
     )
 
     collected: List[Dict[str, Any]] = []
-    for page in pages:
+    for _pg_idx_1, page in enumerate(pages):
+        if _pg_idx_1 >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for item in page.get("Items", []):
             collected.append(_deserialize(item))
     logger.info("events_scanned count=%s floor=%s", len(collected), floor_timestamp)
@@ -162,6 +166,11 @@ def _persist(rows: List[Dict[str, Any]], window_start: int, total_sessions: int)
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     now = int(time.time())
     window_start = now - LOOKBACK_SECONDS
     logger.info("funnel_run_start window_start=%s detail=%s", window_start, event.get("detail-type"))

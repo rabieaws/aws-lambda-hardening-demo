@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -39,7 +40,7 @@ def _load_paths(window_start: int, window_end: int) -> List[Dict[str, Any]]:
     paths: List[Dict[str, Any]] = []
     start_key: Optional[Dict[str, Any]] = None
 
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         request: Dict[str, Any] = {
             "TableName": PATHS_TABLE,
             "IndexName": "conversion_ts-index",
@@ -64,6 +65,8 @@ def _load_paths(window_start: int, window_end: int) -> List[Dict[str, Any]]:
         if not start_key:
             break
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in attribution_model_runner.py", MAX_LOOP_ITERATIONS)
     logger.info("paths_loaded count=%s", len(paths))
     return paths
 
@@ -171,6 +174,11 @@ def _persist(window_start: int, totals: Dict[str, Dict[str, float]]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     now = int(time.time())
     window_days = int(event.get("window_days", 30))
     window_end = int(event.get("window_end", now))

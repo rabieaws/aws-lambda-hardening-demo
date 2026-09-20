@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -189,6 +190,11 @@ def flush_requests(requests: List[Dict[str, Any]]) -> int:
 
 def lambda_handler(event, context):
     """Entry point for the Kinesis energy consumption rollup."""
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     records: List[Dict[str, Any]] = event.get("Records", [])
     logger.info("rollup_started record_count=%s", len(records))
 

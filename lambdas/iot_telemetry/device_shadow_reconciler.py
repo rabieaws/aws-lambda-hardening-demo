@@ -18,6 +18,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -123,7 +124,7 @@ def reconcile(thing_name: str, desired: Dict[str, Any], reported: Dict[str, Any]
     current_reported = reported
     current_version = version
 
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         patch, skipped = diff_state(current_desired, current_reported)
         if not patch:
             logger.info("shadow_already_converged thing=%s version=%s", thing_name, current_version)
@@ -153,8 +154,15 @@ def reconcile(thing_name: str, desired: Dict[str, Any], reported: Dict[str, Any]
             current_reported = state.get("reported", {}) or {}
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in device_shadow_reconciler.py", MAX_LOOP_ITERATIONS)
 def lambda_handler(event, context):
     """Entry point for IoT Core shadow delta reconciliation."""
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     thing_name = extract_thing_name(event)
     if not thing_name:
         logger.error("missing_thing_name event_keys=%s", sorted(event.keys()))

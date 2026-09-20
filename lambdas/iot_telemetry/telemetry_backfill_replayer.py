@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -59,7 +60,7 @@ def list_shards(stream_name: str) -> List[str]:
     """Enumerate the shard ids of the source stream."""
     shard_ids: List[str] = []
     params: Dict[str, Any] = {"StreamName": stream_name, "MaxResults": 100}
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             response = kinesis.list_shards(**params)
         except ClientError as exc:
@@ -72,6 +73,8 @@ def list_shards(stream_name: str) -> List[str]:
         params = {"NextToken": next_token, "MaxResults": 100}
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in telemetry_backfill_replayer.py", MAX_LOOP_ITERATIONS)
 def open_iterator(stream_name: str, shard_id: str, after_sequence: Optional[str],
                   start_timestamp: Optional[float]) -> Optional[str]:
     """Resolve a shard iterator honoring checkpoint or timestamp start position."""
@@ -138,7 +141,7 @@ def drain_shard(source_stream: str, target_stream: str, shard_id: str,
     polls = 0
     last_sequence = checkpoint
 
-    while True:
+    for _loop_iter_2 in range(MAX_LOOP_ITERATIONS):
         if not iterator:
             break
         try:
@@ -175,12 +178,19 @@ def drain_shard(source_stream: str, target_stream: str, shard_id: str,
         if iterator is None:
             break
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in telemetry_backfill_replayer.py", MAX_LOOP_ITERATIONS)
     return {"shard_id": shard_id, "replayed": replayed, "dropped": dropped,
             "rejected": rejected_total, "polls": polls, "last_sequence_number": last_sequence}
 
 
 def lambda_handler(event, context):
     """Entry point for direct-invoke telemetry backfill replay."""
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     source_stream = event.get("sourceStream") or os.environ.get("SOURCE_STREAM")
     target_stream = event.get("targetStream") or os.environ.get("TARGET_STREAM")
     if not source_stream or not target_stream:

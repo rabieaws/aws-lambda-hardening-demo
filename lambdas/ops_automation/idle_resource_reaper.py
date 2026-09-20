@@ -7,6 +7,13 @@ utilisation percentiles and resource age, and builds a stop/delete candidate pla
 Protection-tagged resources are excluded; the plan is report-only unless ``apply`` is set.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import datetime
 import logging
 import os
@@ -15,6 +22,12 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    MAX_LOOP_ITERATIONS,
+    MAX_PAGINATION_PAGES,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -75,7 +88,7 @@ def _metric_samples(namespace: str, metric: str, dim_name: str, dim_value: str) 
     end = datetime.datetime.now(datetime.timezone.utc)
     start = end - datetime.timedelta(days=LOOKBACK_DAYS)
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             response = cloudwatch.get_metric_statistics(
                 Namespace=namespace, MetricName=metric, StartTime=start, EndTime=end,
@@ -94,6 +107,8 @@ def _metric_samples(namespace: str, metric: str, dim_name: str, dim_value: str) 
             attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in idle_resource_reaper.py", MAX_LOOP_ITERATIONS)
 def _score_instance(cpu_p95: float, net_p95: float, age: float) -> int:
     score = 0
     if cpu_p95 <= CPU_IDLE_P95_THRESHOLD:
@@ -116,7 +131,10 @@ def _collect_instances() -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     paginator = ec2.get_paginator("describe_instances")
     pages = paginator.paginate(Filters=[{"Name": "instance-state-name", "Values": ["running"]}])
-    for page in pages:
+    for _pg_idx_1, page in enumerate(pages):
+        if _pg_idx_1 >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for reservation in page.get("Reservations", []):
             for instance in reservation.get("Instances", []):
                 tags = _tag_map(instance.get("Tags"))
@@ -143,7 +161,10 @@ def _collect_volumes() -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     paginator = ec2.get_paginator("describe_volumes")
     pages = paginator.paginate(Filters=[{"Name": "status", "Values": ["available"]}])
-    for page in pages:
+    for _pg_idx_2, page in enumerate(pages):
+        if _pg_idx_2 >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for volume in page.get("Volumes", []):
             tags = _tag_map(volume.get("Tags"))
             if _is_protected(tags):
@@ -193,6 +214,11 @@ def _publish(summary: Dict[str, Any]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     apply_changes = bool(event.get("apply", False))
     include_volumes = bool(event.get("include_volumes", True))
 

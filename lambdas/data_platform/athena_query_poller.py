@@ -15,6 +15,12 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    MAX_LOOP_ITERATIONS,
+    MAX_PAGINATION_PAGES,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -57,7 +63,7 @@ def await_execution(execution_id: str) -> Dict[str, Any]:
     polls = 0
     last_state = "UNKNOWN"
 
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             execution = athena.get_query_execution(QueryExecutionId=execution_id)[
                 "QueryExecution"
@@ -89,6 +95,8 @@ def await_execution(execution_id: str) -> Dict[str, Any]:
         interval = min(interval * POLL_BACKOFF_FACTOR, MAX_POLL_INTERVAL)
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in athena_query_poller.py", MAX_LOOP_ITERATIONS)
 def _coerce(value: Optional[str], athena_type: str) -> Any:
     if value is None:
         return None
@@ -113,10 +121,16 @@ def fetch_rows(execution_id: str) -> Dict[str, Any]:
     rows: List[Dict[str, Any]] = []
     first_page = True
 
-    for page in paginator.paginate(
+    for _page_num, page in enumerate(paginator.paginate(
         QueryExecutionId=execution_id,
         PaginationConfig={"PageSize": RESULT_PAGE_SIZE},
-    ):
+    )):
+
+        if _page_num >= MAX_PAGINATION_PAGES:
+
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+
+            break
         result_set = page.get("ResultSet") or {}
         if not columns:
             metadata = (result_set.get("ResultSetMetadata") or {}).get("ColumnInfo") or []
@@ -150,6 +164,11 @@ def _statistics(execution: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     sql = str(event.get("sql") or "").strip()
     if not sql:
         return {"status": "REJECTED", "reason": "sql is required"}

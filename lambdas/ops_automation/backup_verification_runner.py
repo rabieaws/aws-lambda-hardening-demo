@@ -8,6 +8,13 @@ the restored volume (size parity, encryption, availability, tag propagation), re
 verification outcome in DynamoDB, and tears the restored resource down when ``cleanup`` is set.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import datetime
 import logging
 import os
@@ -16,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -70,7 +78,7 @@ def _latest_recovery_point(vault_name: str, resource_arn: str) -> Optional[Dict[
 
 def _start_restore(recovery_point_arn: str, metadata: Dict[str, str]) -> Optional[str]:
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             response = backup.start_restore_job(
                 RecoveryPointArn=recovery_point_arn, Metadata=metadata,
@@ -88,10 +96,12 @@ def _start_restore(recovery_point_arn: str, metadata: Dict[str, str]) -> Optiona
             attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in backup_verification_runner.py", MAX_LOOP_ITERATIONS)
 def _poll_restore(job_id: str) -> Dict[str, Any]:
     """Poll a restore job until it settles into a terminal state."""
     polls = 0
-    while True:
+    for _loop_iter_2 in range(MAX_LOOP_ITERATIONS):
         try:
             job = backup.describe_restore_job(RestoreJobId=job_id)
         except ClientError as exc:
@@ -108,6 +118,8 @@ def _poll_restore(job_id: str) -> Dict[str, Any]:
         time.sleep(POLL_INTERVAL_SECONDS)
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in backup_verification_runner.py", MAX_LOOP_ITERATIONS)
 def _describe_volume(volume_id: str) -> Optional[Dict[str, Any]]:
     try:
         volumes = ec2.describe_volumes(VolumeIds=[volume_id]).get("Volumes", [])
@@ -168,6 +180,11 @@ def _cleanup(volume_id: str) -> bool:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     vault_name = event.get("vault_name", "default")
     resource_arn = event.get("resource_arn")
     availability_zone = event.get("availability_zone", "us-east-1a")

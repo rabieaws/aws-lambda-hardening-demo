@@ -17,6 +17,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    MAX_LOOP_ITERATIONS,
+    MAX_PAGINATION_PAGES,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -70,7 +76,10 @@ def iter_inventory(bucket: str, prefix: str) -> Iterable[Dict[str, Any]]:
     pages = paginator.paginate(
         Bucket=bucket, Prefix=prefix, PaginationConfig={"PageSize": PAGE_SIZE}
     )
-    for page in pages:
+    for _pg_idx_1, page in enumerate(pages):
+        if _pg_idx_1 >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for item in page.get("Contents") or []:
             yield {
                 "key": item["Key"], "size": int(item.get("Size", 0)),
@@ -84,7 +93,7 @@ def collect_noncurrent_versions(bucket: str, prefix: str) -> Dict[str, int]:
     """Drain list_object_versions to count noncurrent versions per key."""
     counts: Dict[str, int] = {}
     markers: Dict[str, str] = {}
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         response = s3.list_object_versions(
             Bucket=bucket, Prefix=prefix, MaxKeys=PAGE_SIZE, **markers
         )
@@ -96,6 +105,8 @@ def collect_noncurrent_versions(bucket: str, prefix: str) -> Dict[str, int]:
         markers = {"KeyMarker": response.get("NextKeyMarker") or ""}
         if response.get("NextVersionIdMarker"):
             markers["VersionIdMarker"] = response["NextVersionIdMarker"]
+    else:
+        logger.warning("Loop iteration cap reached (%d) in archival_tier_mover.py", MAX_LOOP_ITERATIONS)
     return counts
 
 
@@ -164,6 +175,11 @@ def transition_object(bucket: str, key: str, storage_class: str) -> bool:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     started = time.time()
     reference = _now()
     bucket = str(event.get("bucket") or MEDIA_BUCKET)

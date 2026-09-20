@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -168,6 +169,11 @@ def emit_breach(device_id: str, fence_id: str, point: Point, dwell_seconds: int)
 
 def lambda_handler(event, context):
     """Entry point for IoT Core geofence evaluation."""
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     position = parse_position(event)
     if position is None:
         logger.error("unparseable_position keys=%s", sorted(event.keys()))

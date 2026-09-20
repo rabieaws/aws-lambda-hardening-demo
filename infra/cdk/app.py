@@ -13,6 +13,7 @@ from aws_cdk import aws_events_targets as targets
 from aws_cdk import aws_kinesis as kinesis
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_lambda_event_sources as sources
+from aws_cdk import aws_sqs as sqs
 from constructs import Construct
 
 LAMBDA_ROOT = os.path.join(os.path.dirname(__file__), "..", "..", "lambdas")
@@ -40,6 +41,13 @@ class IdentityStack(Stack):
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             time_to_live_attribute="expires_at",
             removal_policy=RemovalPolicy.RETAIN,
+        )
+
+        self.dlq = sqs.Queue(
+            self,
+            "IdentityDLQ",
+            queue_name="identity-dlq",
+            retention_period=Duration.days(14),
         )
 
         authorizer_fn = self._function("JwtCustomAuthorizer", "jwt_custom_authorizer")
@@ -91,6 +99,9 @@ class IdentityStack(Stack):
             code=lambda_.Code.from_asset(os.path.join(LAMBDA_ROOT, "identity")),
             handler="{0}.lambda_handler".format(module),
             memory_size=memory_size,
+            timeout=Duration.seconds(30),
+            reserved_concurrent_executions=10,
+            dead_letter_queue=self.dlq,
             environment=dict(environment or {}, LOG_LEVEL="INFO"),
         )
 
@@ -136,6 +147,13 @@ class IotTelemetryStack(Stack):
             sort_key=dynamodb.Attribute(name="sk", type=dynamodb.AttributeType.STRING),
             billing_mode=dynamodb.BillingMode.PAY_PER_REQUEST,
             removal_policy=RemovalPolicy.RETAIN,
+        )
+
+        self.dlq = sqs.Queue(
+            self,
+            "IotTelemetryDLQ",
+            queue_name="iot-telemetry-dlq",
+            retention_period=Duration.days(14),
         )
 
         for construct_id_, module in (
@@ -185,6 +203,9 @@ class IotTelemetryStack(Stack):
             code=lambda_.Code.from_asset(os.path.join(LAMBDA_ROOT, "iot_telemetry")),
             handler="{0}.lambda_handler".format(module),
             memory_size=memory_size,
+            timeout=Duration.seconds(30),
+            reserved_concurrent_executions=10,
+            dead_letter_queue=self.dlq,
             environment={"LOG_LEVEL": "INFO", "AGGREGATE_TABLE": "telemetry-window-aggregates"},
         )
 

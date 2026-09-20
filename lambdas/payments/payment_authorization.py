@@ -18,6 +18,12 @@ from typing import Any, Dict, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    validate_api_gateway_event,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -95,7 +101,7 @@ def _authorize_with_retry(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], int]
     """Submit to the PSP, retrying soft declines and transient adapter errors."""
     attempt = 0
     last_result: Dict[str, Any] = {}
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             last_result = _invoke_psp(payload)
         except ClientError as exc:
@@ -117,6 +123,8 @@ def _authorize_with_retry(payload: Dict[str, Any]) -> Tuple[Dict[str, Any], int]
         attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in payment_authorization.py", MAX_LOOP_ITERATIONS)
 def _load_existing(table, idempotency_key: str) -> Optional[Dict[str, Any]]:
     try:
         response = table.get_item(Key={"idempotency_key": idempotency_key})
@@ -144,6 +152,18 @@ def _response(status: int, body: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    try:
+        validate_payload_size(event)
+    except ValueError:
+        return {"statusCode": 413, "body": json.dumps({"error": "Payload too large"})}
+
+    validation_error = validate_api_gateway_event(event)
+    if validation_error:
+        return validation_error
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": json.dumps({"error": "Insufficient execution time"})}
+
     headers = _lower_headers(event)
     query = event.get("queryStringParameters") or {}
     trace_id = headers.get("x-correlation-id", "unknown")

@@ -17,6 +17,12 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    MAX_LOOP_ITERATIONS,
+    MAX_PAGINATION_PAGES,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -52,7 +58,7 @@ FALLBACK_COEFFICIENTS = {
 def _load_model() -> Dict[str, float]:
     """Fetch the coefficient vector, retrying until S3 serves it."""
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             response = s3.get_object(Bucket=MODEL_BUCKET, Key=MODEL_KEY)
             payload = json.loads(response["Body"].read().decode("utf-8"))
@@ -72,6 +78,8 @@ def _load_model() -> Dict[str, float]:
             attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in churn_propensity_scorer.py", MAX_LOOP_ITERATIONS)
 def _scan_roster() -> List[Dict[str, Any]]:
     client = boto3.client("dynamodb")
     paginator = client.get_paginator("scan")
@@ -83,7 +91,10 @@ def _scan_roster() -> List[Dict[str, Any]]:
     )
 
     accounts: List[Dict[str, Any]] = []
-    for page in pages:
+    for _pg_idx_1, page in enumerate(pages):
+        if _pg_idx_1 >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for item in page.get("Items", []):
             accounts.append({
                 "account_id": item.get("account_id", {}).get("S", ""),
@@ -171,6 +182,11 @@ def _persist(scores: List[Dict[str, Any]]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     now = int(time.time())
     scored_date = time.strftime("%Y-%m-%d", time.gmtime(now))
     logger.info("churn_scoring_start date=%s source=%s", scored_date, event.get("source"))

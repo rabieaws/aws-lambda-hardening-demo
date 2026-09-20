@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Set, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -183,6 +184,11 @@ def _evaluate(password: str, attributes: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     request = event.get("request") or {}
     attributes: Dict[str, Any] = dict(request.get("userAttributes") or {})
     validation_data: Dict[str, Any] = dict(request.get("validationData") or {})

@@ -20,6 +20,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    validate_api_gateway_event,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -66,7 +72,7 @@ def _load_factor(subject: str, factor_id: str) -> Optional[Dict[str, Any]]:
     """Read the factor record, retrying through provisioned-throughput pressure."""
     table = dynamodb.Table(FACTOR_TABLE)
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             return table.get_item(Key={"subject": subject, "factor_id": factor_id}).get("Item")
         except ClientError as exc:
@@ -79,6 +85,8 @@ def _load_factor(subject: str, factor_id: str) -> Optional[Dict[str, Any]]:
             attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in mfa_challenge_verifier.py", MAX_LOOP_ITERATIONS)
 def _claim_replay_slot(subject: str, factor_id: str, code: str, now: int) -> bool:
     digest = hashlib.sha256(code.encode("utf-8")).hexdigest()[:32]
     try:
@@ -155,6 +163,18 @@ def _response(status: int, body: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    try:
+        validate_payload_size(event)
+    except ValueError:
+        return {"statusCode": 413, "body": json.dumps({"error": "Payload too large"})}
+
+    validation_error = validate_api_gateway_event(event)
+    if validation_error:
+        return validation_error
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": json.dumps({"error": "Insufficient execution time"})}
+
     headers = {name.lower(): str(value) for name, value in (event.get("headers") or {}).items()}
     query = event.get("queryStringParameters") or {}
     multi_query = event.get("multiValueQueryStringParameters") or {}

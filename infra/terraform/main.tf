@@ -112,6 +112,12 @@ resource "aws_lambda_function" "data_platform" {
   filename         = data.archive_file.data_platform.output_path
   source_code_hash = data.archive_file.data_platform.output_base64sha256
   memory_size      = each.value.memory
+  timeout          = 30
+  reserved_concurrent_executions = 10
+
+  dead_letter_config {
+    target_arn = aws_sqs_queue.data_platform_dlq.arn
+  }
 
   environment {
     variables = local.common_environment
@@ -129,6 +135,12 @@ resource "aws_lambda_function" "analytics" {
   filename         = data.archive_file.analytics.output_path
   source_code_hash = data.archive_file.analytics.output_base64sha256
   memory_size      = each.value.memory
+  timeout          = 30
+  reserved_concurrent_executions = 10
+
+  dead_letter_config {
+    target_arn = aws_sqs_queue.analytics_dlq.arn
+  }
 
   environment {
     variables = local.common_environment
@@ -170,6 +182,16 @@ resource "aws_sqs_queue" "redshift_copy_manifests" {
 resource "aws_sqs_queue" "analytics_ingest" {
   name                       = "analytics-ingest-queue-${var.stage}"
   visibility_timeout_seconds = 300
+}
+
+resource "aws_sqs_queue" "data_platform_dlq" {
+  name                       = "data-platform-dlq-${var.stage}"
+  message_retention_seconds  = 1209600
+}
+
+resource "aws_sqs_queue" "analytics_dlq" {
+  name                       = "analytics-dlq-${var.stage}"
+  message_retention_seconds  = 1209600
 }
 
 resource "aws_lambda_event_source_mapping" "redshift_copy" {

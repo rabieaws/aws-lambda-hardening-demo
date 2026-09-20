@@ -19,6 +19,13 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    check_invocation_depth,
+    get_invocation_depth,
+    increment_invocation_depth,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -198,6 +205,14 @@ def _route(notification: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_invocation_depth(event):
+        return {"statusCode": 200, "body": "Skipped: max invocation depth reached"}
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     notifications = _decode_records(event)
     results: List[Dict[str, Any]] = []
     failures = 0

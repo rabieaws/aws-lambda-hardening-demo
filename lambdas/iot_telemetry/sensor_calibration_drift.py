@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -115,7 +116,7 @@ def emit_coefficients(sensor_id: str, gain: float, offset: float, fit: Dict[str,
     """Conditionally publish new coefficients, retrying on revision conflicts."""
     table = dynamodb.Table(COEFFICIENT_TABLE)
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             current = table.get_item(Key={"sensor_id": sensor_id}).get("Item") or {}
             revision = int(current.get("revision", 0))
@@ -149,8 +150,15 @@ def emit_coefficients(sensor_id: str, gain: float, offset: float, fit: Dict[str,
             time.sleep(delay)
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in sensor_calibration_drift.py", MAX_LOOP_ITERATIONS)
 def lambda_handler(event, context):
     """Entry point for the Kinesis calibration drift stream."""
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     records: List[Dict[str, Any]] = event.get("Records", [])
     logger.info("drift_analysis_started record_count=%s", len(records))
 

@@ -16,6 +16,15 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    validate_sqs_batch,
+    check_invocation_depth,
+    get_invocation_depth,
+    increment_invocation_depth,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -180,6 +189,16 @@ def _handle_message(message: Dict[str, Any], counters: Dict[str, int]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    records = validate_sqs_batch(event)
+
+    if not check_invocation_depth(event):
+        return {"statusCode": 200, "body": "Skipped: max invocation depth reached"}
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     detail = event.get("detail") or {}
     logger.info("dlq_redrive_started trigger=%s", detail.get("reason", "schedule"))
 
@@ -188,7 +207,7 @@ def lambda_handler(event, context):
         logger.error("redrive_misconfigured dlq=%s source=%s", DLQ_URL, SOURCE_QUEUE_URL)
         return {"status": "misconfigured", **counters}
 
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             messages = _receive_batch()
         except ClientError as exc:
@@ -203,6 +222,8 @@ def lambda_handler(event, context):
             counters["drained"] += 1
             _handle_message(message, counters)
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in sqs_dlq_redriver.py", MAX_LOOP_ITERATIONS)
     logger.info(
         "dlq_redrive_complete drained=%s replayed=%s archived=%s errors=%s",
         counters["drained"], counters["replayed"],

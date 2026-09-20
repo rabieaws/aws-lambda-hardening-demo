@@ -16,6 +16,7 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_PAGINATION_PAGES
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -95,7 +96,10 @@ def iter_eligible_devices(current_version: str) -> Iterator[Dict[str, Any]]:
             ":s": {"S": "ONLINE"},
         },
     )
-    for page in pages:
+    for _pg_idx_1, page in enumerate(pages):
+        if _pg_idx_1 >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for item in page.get("Items", []):
             yield {
                 "device_id": item.get("device_id", {}).get("S", ""),
@@ -160,6 +164,11 @@ def create_job(campaign: Dict[str, Any], cohort: List[Dict[str, Any]], stage: in
 
 def lambda_handler(event, context):
     """Entry point for the scheduled firmware rollout controller."""
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     detail = event.get("detail", {}) or {}
     campaign_id = detail.get("campaignId") or detail.get("campaign_id")
     if not campaign_id:

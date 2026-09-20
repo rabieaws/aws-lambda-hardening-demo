@@ -8,6 +8,13 @@ and flags instances whose missing patches are past the severity-specific remedia
 The reporter is read-only and publishes its rollup to SNS.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import datetime
 import logging
 import os
@@ -16,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_PAGINATION_PAGES
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -65,14 +73,20 @@ def _list_instances() -> List[Dict[str, Any]]:
     inventory = ssm.get_paginator("describe_instance_information")
 
     patch_groups: Dict[str, str] = {}
-    for page in inventory.paginate():
+    for _page_num, page in enumerate(inventory.paginate()):
+        if _page_num >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for info in page.get("InstanceInformationList", []):
             patch_groups[info["InstanceId"]] = info.get("ComputerName", "")
 
     instance_ids = list(patch_groups.keys())
     for offset in range(0, len(instance_ids), 50):
         chunk = instance_ids[offset:offset + 50]
-        for page in paginator.paginate(InstanceIds=chunk):
+        for _page_num, page in enumerate(paginator.paginate(InstanceIds=chunk)):
+            if _page_num >= MAX_PAGINATION_PAGES:
+                logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+                break
             for state in page.get("InstancePatchStates", []):
                 state["_computer_name"] = patch_groups.get(state["InstanceId"], "")
                 instances.append(state)
@@ -86,7 +100,10 @@ def _compliance_items(instance_id: str) -> List[Dict[str, Any]]:
         pages = paginator.paginate(
             ResourceIds=[instance_id], ResourceTypes=["ManagedInstance"],
             Filters=[{"Key": "ComplianceType", "Values": ["Patch"], "Type": "EQUAL"}])
-        for page in pages:
+        for _pg_idx_1, page in enumerate(pages):
+            if _pg_idx_1 >= MAX_PAGINATION_PAGES:
+                logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+                break
             items.extend(page.get("ComplianceItems", []))
     except ClientError as exc:
         logger.warning("compliance_items_failed instance=%s error=%s", instance_id,
@@ -187,6 +204,11 @@ def _publish(summary: Dict[str, Any]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     notify = bool(event.get("notify", True))
     patch_group_filter = event.get("patch_group")
 

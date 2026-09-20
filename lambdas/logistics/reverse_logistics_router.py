@@ -7,6 +7,13 @@ the nearest capable facility and the cost of each disposition path to route a re
 to repair, restock, liquidate or scrap, then books it with the disposition service.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import json
 import logging
 import math
@@ -19,6 +26,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    validate_sqs_batch,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -150,7 +163,7 @@ def _post_disposition(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         url, data=json.dumps(payload, default=str).encode("utf-8"),
         headers={"Content-Type": "application/json"}, method="POST")
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as handle:
                 return json.loads(handle.read().decode("utf-8"))
@@ -166,6 +179,8 @@ def _post_disposition(payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in reverse_logistics_router.py", MAX_LOOP_ITERATIONS)
 def _record(return_id: str, decision: Dict[str, Any], booking: Optional[Dict[str, Any]]) -> None:
     try:
         dynamodb.Table(DISPOSITION_TABLE).put_item(Item={
@@ -180,6 +195,13 @@ def _record(return_id: str, decision: Dict[str, Any], booking: Optional[Dict[str
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    records = validate_sqs_batch(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     records: List[Dict[str, Any]] = event.get("Records") or []
     failures: List[Dict[str, str]] = []
     routed: Dict[str, int] = {"RESTOCK": 0, "REPAIR": 0, "LIQUIDATE": 0, "SCRAP": 0}

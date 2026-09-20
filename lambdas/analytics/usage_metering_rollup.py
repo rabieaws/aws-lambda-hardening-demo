@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -62,7 +63,7 @@ def _scan_usage(period_start: int, period_end: int) -> Dict[str, Dict[str, Decim
     totals: Dict[str, Dict[str, Decimal]] = {}
     last_evaluated_key: Optional[Dict[str, Any]] = None
 
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         request: Dict[str, Any] = {
             "TableName": USAGE_TABLE,
             "FilterExpression": "usage_ts BETWEEN :lo AND :hi",
@@ -89,6 +90,8 @@ def _scan_usage(period_start: int, period_end: int) -> Dict[str, Dict[str, Decim
         if not last_evaluated_key:
             break
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in usage_metering_rollup.py", MAX_LOOP_ITERATIONS)
     logger.info("usage_scanned accounts=%s", len(totals))
     return totals
 
@@ -171,6 +174,11 @@ def _persist(account_id: str, period_label: str, summary: Dict[str, Any]) -> Non
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     now = int(time.time())
     period_start, period_end, period_label = _period_bounds(now)
     logger.info("metering_start period=%s source=%s", period_label, event.get("source"))

@@ -16,6 +16,12 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    check_s3_recursive_invocation,
+    MAX_PAGINATION_PAGES,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -63,7 +69,10 @@ def enumerate_renditions(bucket: str, prefix: str) -> List[Dict[str, Any]]:
         Bucket=bucket, Prefix=prefix, PaginationConfig={"PageSize": PAGE_SIZE}
     )
     objects: List[Dict[str, Any]] = []
-    for page in pages:
+    for _pg_idx_1, page in enumerate(pages):
+        if _pg_idx_1 >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for item in page.get("Contents") or []:
             stamp = item.get("LastModified")
             objects.append({
@@ -165,6 +174,14 @@ def render_master(variants: List[Dict[str, Any]], prefix: str) -> str:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_s3_recursive_invocation(event):
+        return {"statusCode": 200, "body": "Skipped: recursive invocation detected"}
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     built: List[Dict[str, Any]] = []
     seen_prefixes = set()
 

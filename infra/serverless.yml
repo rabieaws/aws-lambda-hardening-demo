@@ -8,6 +8,7 @@ provider:
   region: us-east-1
   stage: ${opt:stage, 'prod'}
   memorySize: 512
+  timeout: 30
   environment:
     LOG_LEVEL: INFO
     STAGE: ${self:provider.stage}
@@ -46,6 +47,8 @@ functions:
 
   imageThumbnailGenerator:
     handler: image_thumbnail_generator.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     package:
       patterns:
         - '../lambdas/media_pipeline/image_thumbnail_generator.py'
@@ -57,7 +60,9 @@ functions:
 
   videoTranscodeOrchestrator:
     handler: video_transcode_orchestrator.lambda_handler
-    timeout: 900
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
+    timeout: 120
     package:
       patterns:
         - '../lambdas/media_pipeline/video_transcode_orchestrator.py'
@@ -69,6 +74,8 @@ functions:
 
   exifMetadataExtractor:
     handler: exif_metadata_extractor.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     package:
       patterns:
         - '../lambdas/media_pipeline/exif_metadata_extractor.py'
@@ -80,6 +87,8 @@ functions:
 
   subtitleBurnIn:
     handler: subtitle_burn_in.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     package:
       patterns:
         - '../lambdas/media_pipeline/subtitle_burn_in.py'
@@ -91,7 +100,9 @@ functions:
 
   audioWaveformPeaks:
     handler: audio_waveform_peaks.lambda_handler
-    timeout: 900
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
+    timeout: 120
     memorySize: 1536
     package:
       patterns:
@@ -104,6 +115,8 @@ functions:
 
   contentModerationScreener:
     handler: content_moderation_screener.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     package:
       patterns:
         - '../lambdas/media_pipeline/content_moderation_screener.py'
@@ -115,6 +128,8 @@ functions:
 
   mediaManifestBuilder:
     handler: media_manifest_builder.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     package:
       patterns:
         - '../lambdas/media_pipeline/media_manifest_builder.py'
@@ -126,6 +141,8 @@ functions:
 
   watermarkApplier:
     handler: watermark_applier.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     memorySize: 1536
     package:
       patterns:
@@ -138,6 +155,8 @@ functions:
 
   cdnCacheInvalidator:
     handler: cdn_cache_invalidator.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     environment:
       CLOUDFRONT_DISTRIBUTION_ID: ${env:CLOUDFRONT_DISTRIBUTION_ID, ''}
     package:
@@ -151,7 +170,9 @@ functions:
 
   archivalTierMover:
     handler: archival_tier_mover.lambda_handler
-    timeout: 900
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
+    timeout: 120
     package:
       patterns:
         - '../lambdas/media_pipeline/archival_tier_mover.py'
@@ -162,6 +183,8 @@ functions:
 
   notificationFanoutRouter:
     handler: notification_fanout_router.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     environment:
       FANOUT_TOPIC_ARN: !Ref NotificationFanoutTopic
     package:
@@ -174,7 +197,9 @@ functions:
 
   sqsDlqRedriver:
     handler: sqs_dlq_redriver.lambda_handler
-    timeout: 900
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
+    timeout: 120
     package:
       patterns:
         - '../lambdas/messaging/sqs_dlq_redriver.py'
@@ -183,6 +208,8 @@ functions:
 
   emailDigestBatcher:
     handler: email_digest_batcher.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     package:
       patterns:
         - '../lambdas/messaging/email_digest_batcher.py'
@@ -193,7 +220,9 @@ functions:
 
   pushTokenPruner:
     handler: push_token_pruner.lambda_handler
-    timeout: 900
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
+    timeout: 120
     package:
       patterns:
         - '../lambdas/messaging/push_token_pruner.py'
@@ -202,6 +231,8 @@ functions:
 
   webhookRetryScheduler:
     handler: webhook_retry_scheduler.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     environment:
       RETRY_QUEUE_URL: !Ref WebhookRetryQueue
     package:
@@ -214,6 +245,8 @@ functions:
 
   smsRateGovernor:
     handler: sms_rate_governor.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     package:
       patterns:
         - '../lambdas/messaging/sms_rate_governor.py'
@@ -224,6 +257,8 @@ functions:
 
   chatMessageBroadcaster:
     handler: chat_message_broadcaster.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     environment:
       BROADCAST_TOPIC_ARN: !Ref ChatBroadcastTopic
     package:
@@ -236,7 +271,9 @@ functions:
 
   topicSubscriptionReconciler:
     handler: topic_subscription_reconciler.lambda_handler
-    timeout: 900
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
+    timeout: 120
     package:
       patterns:
         - '../lambdas/messaging/topic_subscription_reconciler.py'
@@ -245,6 +282,8 @@ functions:
 
   eventOrderingBuffer:
     handler: event_ordering_buffer.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     environment:
       BUFFER_QUEUE_URL: !Ref EventOrderingQueue
     package:
@@ -257,6 +296,8 @@ functions:
 
   campaignThrottleDispatcher:
     handler: campaign_throttle_dispatcher.lambda_handler
+    reservedConcurrency: 10
+    onError: !GetAtt MediaMessagingDLQ.Arn
     environment:
       CAMPAIGN_DISPATCH_QUEUE_URL: !Ref CampaignDispatchQueue
     package:
@@ -308,3 +349,9 @@ resources:
       Properties:
         QueueName: campaign-dispatch-${self:provider.stage}
         VisibilityTimeout: 300
+
+    MediaMessagingDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: media-messaging-dlq-${self:provider.stage}
+        MessageRetentionPeriod: 1209600

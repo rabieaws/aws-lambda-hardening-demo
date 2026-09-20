@@ -7,6 +7,13 @@ rejects transitions that are illegal for the current milestone, and de-duplicate
 repeated scans that carriers frequently replay for the same facility and minute.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import hashlib
 import json
 import logging
@@ -17,6 +24,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, validate_sqs_batch
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -161,6 +169,13 @@ def _decode_record(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    records = validate_sqs_batch(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     records: List[Dict[str, Any]] = event.get("Records") or []
     failures: List[Dict[str, str]] = []
     applied = 0

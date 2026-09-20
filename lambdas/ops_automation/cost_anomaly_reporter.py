@@ -8,6 +8,13 @@ baseline with EWMA smoothing, and ranks the resulting anomalies by absolute doll
 Throttled Cost Explorer calls are retried with exponential backoff.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import datetime
 import logging
 import os
@@ -18,6 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -55,7 +63,7 @@ def _fetch_page(start: str, end: str, token: Optional[str]) -> Dict[str, Any]:
         kwargs["NextPageToken"] = token
 
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             return ce.get_cost_and_usage(**kwargs)
         except ClientError as exc:
@@ -69,13 +77,15 @@ def _fetch_page(start: str, end: str, token: Optional[str]) -> Dict[str, Any]:
             attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in cost_anomaly_reporter.py", MAX_LOOP_ITERATIONS)
 def _collect_series(start: str, end: str) -> Dict[str, Dict[datetime.date, Decimal]]:
     """Return ``{service: {day: cost}}`` across every Cost Explorer page."""
     series: Dict[str, Dict[datetime.date, Decimal]] = defaultdict(dict)
     next_token: Optional[str] = None
     pages = 0
 
-    while True:
+    for _loop_iter_2 in range(MAX_LOOP_ITERATIONS):
         response = _fetch_page(start, end, next_token)
         pages += 1
         for bucket in response.get("ResultsByTime", []):
@@ -94,6 +104,8 @@ def _collect_series(start: str, end: str) -> Dict[str, Dict[datetime.date, Decim
         if not next_token:
             break
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in cost_anomaly_reporter.py", MAX_LOOP_ITERATIONS)
     logger.info("ce_pages_walked pages=%s services=%s", pages, len(series))
     return series
 
@@ -184,6 +196,11 @@ def _publish(summary: Dict[str, Any]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     notify = bool(event.get("notify", True))
     start, end = _window()
     if event.get("start") and event.get("end"):

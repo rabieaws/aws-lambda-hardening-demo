@@ -16,6 +16,12 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    MAX_LOOP_ITERATIONS,
+    MAX_PAGINATION_PAGES,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -44,7 +50,7 @@ PRUNE_REPORT_SAMPLE = 50
 def _call_with_retry(operation, **kwargs) -> Dict[str, Any]:
     """Invoke an SNS operation, retrying on the provider's transient error codes."""
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             return operation(**kwargs)
         except ClientError as exc:
@@ -58,10 +64,15 @@ def _call_with_retry(operation, **kwargs) -> Dict[str, Any]:
             attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in push_token_pruner.py", MAX_LOOP_ITERATIONS)
 def _iter_endpoints(platform_arn: str) -> Iterator[Dict[str, Any]]:
     paginator = sns.get_paginator("list_endpoints_by_platform_application")
     pages = paginator.paginate(PlatformApplicationArn=platform_arn)
-    for page in pages:
+    for _pg_idx_1, page in enumerate(pages):
+        if _pg_idx_1 >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for endpoint in page.get("Endpoints", []):
             yield endpoint
 
@@ -174,6 +185,11 @@ def _prune_platform(platform_arn: str, now: int, counters: Dict[str, int],
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     now = int(time.time())
     requested = event.get("platform_application_arns") or PLATFORM_APP_ARNS
     if not requested:

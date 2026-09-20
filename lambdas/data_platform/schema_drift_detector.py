@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_PAGINATION_PAGES
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -59,7 +60,10 @@ def flatten_columns(table: Dict[str, Any]) -> Dict[str, str]:
 def list_tables(database: str) -> List[Dict[str, Any]]:
     tables: List[Dict[str, Any]] = []
     paginator = glue.get_paginator("get_tables")
-    for page in paginator.paginate(DatabaseName=database):
+    for _page_num, page in enumerate(paginator.paginate(DatabaseName=database)):
+        if _page_num >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         tables.extend(page.get("TableList", []))
     return tables
 
@@ -162,6 +166,11 @@ def publish_alert(table_name: str, verdict: str, changes: List[Dict[str, str]]) 
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     detail = event.get("detail") or {}
     database = str(detail.get("database") or event.get("database") or GLUE_DATABASE)
     now = int(time.time())

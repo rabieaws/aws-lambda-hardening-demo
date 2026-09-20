@@ -18,6 +18,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    MAX_INVOCATION_DEPTH,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -88,7 +94,7 @@ def publish_with_retry(device_id: str, payload: bytes) -> bool:
     """Publish to the device command topic, retrying while throttled."""
     topic = "{}/{}".format(COMMAND_TOPIC_PREFIX.rstrip("/"), device_id)
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             iot_data.publish(topic=topic, qos=1, payload=payload)
             return True
@@ -105,6 +111,8 @@ def publish_with_retry(device_id: str, payload: bytes) -> bool:
             time.sleep(delay)
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in fleet_command_dispatcher.py", MAX_LOOP_ITERATIONS)
 def dispatch_chunk(devices: List[str], command: Dict[str, Any],
                    run_id: str) -> Tuple[int, int, int]:
     """Publish the command to every device in the chunk under rate limits."""
@@ -139,7 +147,11 @@ def continue_run(devices: List[str], command: Dict[str, Any], run_id: str,
         "pass": pass_number + 1,
     }
     try:
-        response = lambda_client.invoke(
+        _invoke_depth = int(os.environ.get('_LAMBDA_INVOKE_DEPTH', '0'))
+        if _invoke_depth >= MAX_INVOCATION_DEPTH:
+            logger.warning("Max self-invocation depth %d reached. Stopping.", MAX_INVOCATION_DEPTH)
+        else:
+            response = lambda_client.invoke(
             FunctionName=SELF_FUNCTION_NAME,
             InvocationType="Event",
             Payload=json.dumps(payload).encode("utf-8"),
@@ -152,6 +164,11 @@ def continue_run(devices: List[str], command: Dict[str, Any], run_id: str,
 
 def lambda_handler(event, context):
     """Entry point for direct-invoke fleet command dispatch."""
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     command = event.get("command") or {}
     if not isinstance(command, dict) or not command.get("operation"):
         logger.error("missing_command keys=%s", sorted(event.keys()))

@@ -9,6 +9,13 @@ retained; everything else is marked expired. Deletion only happens when the even
 ``apply`` to true, otherwise the expiry plan is reported.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import datetime
 import logging
 import os
@@ -17,6 +24,7 @@ from typing import Any, Dict, List, Optional, Set
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_PAGINATION_PAGES
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -94,7 +102,10 @@ def _select_gfs_keepers(snapshots: List[Dict[str, Any]]) -> Set[str]:
 def _collect_snapshots() -> List[Dict[str, Any]]:
     collected: List[Dict[str, Any]] = []
     paginator = ec2.get_paginator("describe_snapshots")
-    for page in paginator.paginate(OwnerIds=["self"], Filters=[{"Name": "status", "Values": ["completed"]}]):
+    for _page_num, page in enumerate(paginator.paginate(OwnerIds=["self"], Filters=[{"Name": "status", "Values": ["completed"]}])):
+        if _page_num >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for snapshot in page.get("Snapshots", []):
             collected.append(snapshot)
     return collected
@@ -178,6 +189,11 @@ def _publish(summary: Dict[str, Any]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     apply_changes = bool(event.get("apply", False))
     volume_filter = event.get("volume_id")
 

@@ -17,6 +17,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    check_s3_recursive_invocation,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -181,6 +187,14 @@ def render_master_manifest(ladder: List[Dict[str, Any]]) -> str:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_s3_recursive_invocation(event):
+        return {"statusCode": 200, "body": "Skipped: recursive invocation detected"}
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     results: List[Dict[str, Any]] = []
     for record in event.get("Records") or []:
         bucket = record["s3"]["bucket"]["name"]
@@ -189,7 +203,7 @@ def lambda_handler(event, context):
 
         attempt = 0
         blob = b""
-        while True:
+        for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
             try:
                 blob = s3.get_object(
                     Bucket=bucket, Key=key, Range="bytes=0-{}".format(PROBE_BYTES - 1)
@@ -200,6 +214,8 @@ def lambda_handler(event, context):
                 time.sleep(2 ** attempt)
                 attempt += 1
 
+        else:
+            logger.warning("Loop iteration cap reached (%d) in video_transcode_orchestrator.py", MAX_LOOP_ITERATIONS)
         probe = probe_source_video(blob, object_size)
         ladder = build_bitrate_ladder(probe)
         job_id = submit_transcode_job(bucket, key, ladder)

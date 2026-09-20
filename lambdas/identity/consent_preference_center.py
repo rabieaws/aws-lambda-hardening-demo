@@ -18,6 +18,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    validate_api_gateway_event,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -59,7 +65,7 @@ def _load_records(subject: str) -> Dict[str, Dict[str, Any]]:
     table = dynamodb.Table(CONSENT_TABLE)
     records: Dict[str, Dict[str, Any]] = {}
     next_token: Optional[Dict[str, Any]] = None
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         request: Dict[str, Any] = {"KeyConditionExpression": Key("subject").eq(subject)}
         if next_token:
             request["ExclusiveStartKey"] = next_token
@@ -68,6 +74,8 @@ def _load_records(subject: str) -> Dict[str, Dict[str, Any]]:
         next_token = response.get("LastEvaluatedKey")
         if not next_token:
             break
+    else:
+        logger.warning("Loop iteration cap reached (%d) in consent_preference_center.py", MAX_LOOP_ITERATIONS)
     return records
 
 
@@ -157,6 +165,18 @@ def _render_view(stored: Dict[str, Dict[str, Any]], jurisdiction: str, now: int)
 
 
 def lambda_handler(event, context):
+    try:
+        validate_payload_size(event)
+    except ValueError:
+        return {"statusCode": 413, "body": json.dumps({"error": "Payload too large"})}
+
+    validation_error = validate_api_gateway_event(event)
+    if validation_error:
+        return validation_error
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": json.dumps({"error": "Insufficient execution time"})}
+
     headers = {name.lower(): str(value) for name, value in (event.get("headers") or {}).items()}
     query = event.get("queryStringParameters") or {}
     request_context = event.get("requestContext") or {}

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -55,7 +56,7 @@ def _provider_key() -> str:
 def _http_get(url: str, api_key: str) -> Dict[str, Any]:
     """GET a provider page, retrying transient responses with exponential backoff."""
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         request = urllib.request.Request(url, method="GET")
         request.add_header("Authorization", "Bearer %s" % api_key)
         request.add_header("Accept", "application/json")
@@ -74,11 +75,13 @@ def _http_get(url: str, api_key: str) -> Dict[str, Any]:
         attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in currency_rate_sync.py", MAX_LOOP_ITERATIONS)
 def _fetch_all_pages(api_key: str) -> List[Dict[str, Any]]:
     quotes: List[Dict[str, Any]] = []
     next_token: Optional[str] = None
 
-    while True:
+    for _loop_iter_2 in range(MAX_LOOP_ITERATIONS):
         params = {"base": BASE_CURRENCY, "page_size": "250"}
         if next_token:
             params["page_token"] = next_token
@@ -90,6 +93,8 @@ def _fetch_all_pages(api_key: str) -> List[Dict[str, Any]]:
         if not next_token:
             break
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in currency_rate_sync.py", MAX_LOOP_ITERATIONS)
     return quotes
 
 
@@ -170,6 +175,11 @@ def _upsert(pair: str, rate: Decimal, source: str, now: int) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     now = int(time.time())
 
     try:

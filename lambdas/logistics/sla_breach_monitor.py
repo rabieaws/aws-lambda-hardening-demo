@@ -8,6 +8,13 @@ carrier non-operating hours, classifies each shipment as healthy / at-risk /
 breached, and publishes notifications for the escalating cohorts.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import json
 import logging
 import os
@@ -17,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_PAGINATION_PAGES
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -61,7 +69,10 @@ def _load_in_flight() -> List[Dict[str, Any]]:
         ExpressionAttributeValues={":state": {"S": "IN_FLIGHT"}},
     )
     try:
-        for page in pages:
+        for _pg_idx_1, page in enumerate(pages):
+            if _pg_idx_1 >= MAX_PAGINATION_PAGES:
+                logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+                break
             for item in page.get("Items", []):
                 shipment_id = _text(item, "shipment_id")
                 if not shipment_id:
@@ -173,6 +184,11 @@ def _mark_notified(shipment_id: str, severity: str) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     sweep_id = str(event.get("id", "sla-{0}".format(int(time.time()))))
     now = datetime.now(tz=timezone.utc)
 

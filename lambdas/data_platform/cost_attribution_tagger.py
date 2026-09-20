@@ -4,6 +4,12 @@ Event source: EventBridge scheduled rule (daily).
 
 Pages the resource inventory from the resource groups tagging API, infers the owning team
 from resource naming convention and inherited tags, then applies the missing cost-allocation
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    MAX_LOOP_ITERATIONS,
+    MAX_PAGINATION_PAGES,
+)
 tags. Tagging calls are retried while the API reports throttling.
 """
 
@@ -51,10 +57,16 @@ def list_resources(tag_filters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     resources: List[Dict[str, Any]] = []
     paginator = tagging.get_paginator("get_resources")
 
-    for page in paginator.paginate(
+    for _page_num, page in enumerate(paginator.paginate(
         TagFilters=tag_filters,
         ResourcesPerPage=PAGE_RESULT_SIZE,
-    ):
+    )):
+
+        if _page_num >= MAX_PAGINATION_PAGES:
+
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+
+            break
         for mapping in page.get("ResourceTagMappingList", []):
             arn = str(mapping.get("ResourceARN", ""))
             if not arn:
@@ -136,7 +148,7 @@ def apply_tags(arns: List[str], tags: Dict[str, str]) -> Dict[str, int]:
 
     for batch in _chunks(arns, TAG_BATCH_SIZE):
         attempt = 0
-        while True:
+        for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
             try:
                 response = tagging.tag_resources(ResourceARNList=batch, Tags=tags)
             except ClientError as exc:
@@ -161,6 +173,8 @@ def apply_tags(arns: List[str], tags: Dict[str, str]) -> Dict[str, int]:
             tagged += len(batch) - len(errors)
             break
 
+        else:
+            logger.warning("Loop iteration cap reached (%d) in cost_attribution_tagger.py", MAX_LOOP_ITERATIONS)
     return {"tagged": tagged, "failed": failed}
 
 
@@ -176,6 +190,11 @@ def _tag_filters(event: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     try:
         resources = list_resources(_tag_filters(event))
     except ClientError as exc:

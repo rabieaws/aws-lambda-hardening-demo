@@ -17,6 +17,12 @@ from typing import Any, Dict, List, Optional
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    validate_sqs_batch,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -103,7 +109,7 @@ def _fee_reversal(
 
 def _submit_refund(request: Dict[str, Any]) -> Dict[str, Any]:
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             body = json.dumps({"operation": "refund", **request}, default=str)
             response = lambda_client.invoke(
@@ -125,6 +131,8 @@ def _submit_refund(request: Dict[str, Any]) -> Dict[str, Any]:
         attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in refund_processor.py", MAX_LOOP_ITERATIONS)
 def _record_refund(record: Dict[str, Any]) -> None:
     table = dynamodb.Table(REFUND_TABLE)
     try:
@@ -189,6 +197,13 @@ def _parse(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    records = validate_sqs_batch(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     records: List[Dict[str, Any]] = event.get("Records", [])
     now = int(time.time())
     failures: List[Dict[str, str]] = []

@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -177,6 +178,11 @@ def apply_change(change: Dict[str, Any], now: int) -> str:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     records = event.get("Records") or []
     now = int(time.time())
 

@@ -21,6 +21,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    validate_sqs_batch,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -111,7 +117,7 @@ def deliver_with_backoff(
     partner_id = str(subscription.get("partner_id", "unknown"))
     attempt = 0
 
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         request = build_request(endpoint, secret, event_payload)
         accepted, code, detail = attempt_delivery(request)
         if accepted:
@@ -144,6 +150,8 @@ def deliver_with_backoff(
         attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in order_status_webhook_fanout.py", MAX_LOOP_ITERATIONS)
 def record_delivery(order_id: str, status: str, results: List[Dict[str, Any]]) -> None:
     try:
         dynamodb.Table(DELIVERY_LOG_TABLE).put_item(
@@ -161,6 +169,13 @@ def record_delivery(order_id: str, status: str, results: List[Dict[str, Any]]) -
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    records = validate_sqs_batch(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     records = event.get("Records") or []
     failures: List[Dict[str, str]] = []
     delivered_total = 0

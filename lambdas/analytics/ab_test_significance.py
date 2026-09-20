@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -170,6 +171,11 @@ def _persist(experiment_id: str, peek: int, arms: List[Dict[str, Any]]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     experiment_id = str(event.get("experiment_id", "unknown"))
     peek = int(event.get("peek_number", 1))
     control: Optional[Dict[str, Any]] = event.get("control")

@@ -8,6 +8,13 @@ profiles, and derives a scheduled-scaling plan with capacity headroom and a ramp
 Scheduled actions are written only when the event sets ``apply``.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import datetime
 import logging
 import os
@@ -16,6 +23,7 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_PAGINATION_PAGES
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -162,7 +170,13 @@ def _tune_groups(name_filter: Optional[str]) -> List[Dict[str, Any]]:
     if name_filter:
         kwargs["AutoScalingGroupNames"] = [name_filter]
 
-    for page in paginator.paginate(**kwargs):
+    for _page_num, page in enumerate(paginator.paginate(**kwargs)):
+
+        if _page_num >= MAX_PAGINATION_PAGES:
+
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+
+            break
         for group in page.get("AutoScalingGroups", []):
             group_name = group["AutoScalingGroupName"]
             current_desired = int(group.get("DesiredCapacity", MIN_CAPACITY_FLOOR))
@@ -191,6 +205,11 @@ def _tune_groups(name_filter: Optional[str]) -> List[Dict[str, Any]]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     apply_changes = bool(event.get("apply", False))
     name_filter = event.get("auto_scaling_group_name")
 

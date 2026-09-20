@@ -19,6 +19,12 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    MAX_INVOCATION_DEPTH,
+    MAX_PAGINATION_PAGES,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -148,7 +154,10 @@ def sweep(start_key: Optional[Dict[str, Any]]) -> Dict[str, Any]:
         PaginationConfig=pagination_config,
     )
 
-    for page in pages_iterator:
+    for _pg_idx_1, page in enumerate(pages_iterator):
+        if _pg_idx_1 >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         pages += 1
         items = page.get("Items") or []
         scanned += len(items)
@@ -168,7 +177,11 @@ def continue_sweep(pending: List[Dict[str, Any]], pass_number: int) -> None:
         "pending_candidates": pending, "pass_number": pass_number + 1,
         "source": "self-continuation",
     }
-    lambda_client.invoke(
+    _invoke_depth = int(os.environ.get('_LAMBDA_INVOKE_DEPTH', '0'))
+    if _invoke_depth >= MAX_INVOCATION_DEPTH:
+        logger.warning("Max self-invocation depth %d reached. Stopping.", MAX_INVOCATION_DEPTH)
+    else:
+        lambda_client.invoke(
         FunctionName=FUNCTION_NAME,
         InvocationType="Event",
         Payload=json.dumps(payload).encode("utf-8"),
@@ -177,6 +190,11 @@ def continue_sweep(pending: List[Dict[str, Any]], pass_number: int) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     pass_number = int(event.get("pass_number", 0))
     pending = event.get("pending_candidates")
 

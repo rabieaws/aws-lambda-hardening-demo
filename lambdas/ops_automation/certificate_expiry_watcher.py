@@ -8,6 +8,13 @@ use), ladders the notification severity from informational through critical, and
 owning team. The watcher is read-only apart from the notifications it emits.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import datetime
 import logging
 import os
@@ -15,6 +22,7 @@ from typing import Any, Dict, List, Optional, Sequence
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_PAGINATION_PAGES
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -124,7 +132,10 @@ def _describe(arn: str) -> Optional[Dict[str, Any]]:
 def _list_certificate_arns() -> List[str]:
     arns: List[str] = []
     paginator = acm.get_paginator("list_certificates")
-    for page in paginator.paginate(CertificateStatuses=CERTIFICATE_STATUSES):
+    for _page_num, page in enumerate(paginator.paginate(CertificateStatuses=CERTIFICATE_STATUSES)):
+        if _page_num >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for summary in page.get("CertificateSummaryList", []):
             arns.append(summary["CertificateArn"])
     return arns
@@ -194,6 +205,11 @@ def _notify_owners(findings: List[Dict[str, Any]]) -> int:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     horizon = int(event.get("horizon_days", NOTIFY_AT_OR_BELOW_DAYS))
     notify = bool(event.get("notify", True))
 

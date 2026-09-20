@@ -9,6 +9,13 @@ are retried with exponential backoff. Changes are only applied when the event se
 ``apply`` to true; the default path reports the required drift only.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import logging
 import os
 import time
@@ -16,6 +23,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    MAX_LOOP_ITERATIONS,
+    MAX_PAGINATION_PAGES,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -122,7 +135,7 @@ def _intended_retention(group_name: str, tags: Dict[str, str]) -> Tuple[int, str
 
 def _apply_retention(group_name: str, days: int) -> bool:
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             logs.put_retention_policy(logGroupName=group_name, retentionInDays=days)
             return True
@@ -140,13 +153,18 @@ def _apply_retention(group_name: str, days: int) -> bool:
             attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in log_group_retention_enforcer.py", MAX_LOOP_ITERATIONS)
 def _collect_drift(prefix: Optional[str]) -> List[Dict[str, Any]]:
     drift: List[Dict[str, Any]] = []
     paginator = logs.get_paginator("describe_log_groups")
     kwargs: Dict[str, Any] = {}
     if prefix:
         kwargs["logGroupNamePrefix"] = prefix
-    for page in paginator.paginate(**kwargs):
+    for _page_num, page in enumerate(paginator.paginate(**kwargs)):
+        if _page_num >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for group in page.get("logGroups", []):
             name = group["logGroupName"]
             current = group.get("retentionInDays")
@@ -179,6 +197,11 @@ def _publish(summary: Dict[str, Any]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     apply_changes = bool(event.get("apply", False))
     allow_shrink = bool(event.get("allow_shrink", False))
     prefix = event.get("log_group_prefix")

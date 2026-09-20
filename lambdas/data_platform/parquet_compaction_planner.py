@@ -15,6 +15,7 @@ from typing import Any, Dict, List
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_PAGINATION_PAGES
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -44,7 +45,13 @@ def list_candidate_objects(bucket: str, prefix: str) -> List[Dict[str, Any]]:
     candidates: List[Dict[str, Any]] = []
     paginator = s3.get_paginator("list_objects_v2")
 
-    for page in paginator.paginate(Bucket=bucket, Prefix=prefix):
+    for _page_num, page in enumerate(paginator.paginate(Bucket=bucket, Prefix=prefix)):
+
+        if _page_num >= MAX_PAGINATION_PAGES:
+
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+
+            break
         for obj in page.get("Contents", []):
             key = str(obj.get("Key", ""))
             size = int(obj.get("Size", 0))
@@ -162,6 +169,11 @@ def _targets(event: Dict[str, Any]) -> List[Dict[str, str]]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     targets = _targets(event)
     if not targets:
         logger.info("no compaction targets supplied")

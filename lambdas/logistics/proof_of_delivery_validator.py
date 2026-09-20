@@ -9,6 +9,13 @@ photo carries no residual EXIF metadata. The verdict is written back as a
 sidecar document alongside the original capture.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import json
 import logging
 import math
@@ -19,6 +26,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, check_s3_recursive_invocation
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -176,6 +184,14 @@ def _record_verdict(verdict: Dict[str, Any]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_s3_recursive_invocation(event):
+        return {"statusCode": 200, "body": "Skipped: recursive invocation detected"}
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     results: List[Dict[str, Any]] = []
 
     for record in event.get("Records") or []:

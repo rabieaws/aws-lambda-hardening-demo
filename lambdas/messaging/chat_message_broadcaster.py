@@ -18,6 +18,14 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    check_invocation_depth,
+    get_invocation_depth,
+    increment_invocation_depth,
+    MAX_INVOCATION_DEPTH,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -151,7 +159,11 @@ def _invoke_tail(broadcast: Dict[str, Any], remaining: List[str],
     payload["recipient_ids"] = remaining
     payload["chunk_index"] = next_chunk_index
     try:
-        lambda_client.invoke(
+        _invoke_depth = int(os.environ.get('_LAMBDA_INVOKE_DEPTH', '0'))
+        if _invoke_depth >= MAX_INVOCATION_DEPTH:
+            logger.warning("Max self-invocation depth %d reached. Stopping.", MAX_INVOCATION_DEPTH)
+        else:
+            lambda_client.invoke(
             FunctionName=SELF_FUNCTION_NAME,
             InvocationType="Event",
             Payload=json.dumps(payload).encode("utf-8"),
@@ -203,6 +215,14 @@ def _expand(broadcast: Dict[str, Any], now: int) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_invocation_depth(event):
+        return {"statusCode": 200, "body": "Skipped: max invocation depth reached"}
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     now = int(time.time())
     broadcasts = _decode_records(event)
     results: List[Dict[str, Any]] = []

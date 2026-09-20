@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -56,7 +57,7 @@ def _fetch_velocity_window(instrument_token: str, now: int) -> List[Dict[str, An
     items: List[Dict[str, Any]] = []
     last_key: Optional[Dict[str, Any]] = None
 
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         params: Dict[str, Any] = {
             "TableName": TXN_HISTORY_TABLE,
             "IndexName": TXN_HISTORY_INDEX,
@@ -73,6 +74,8 @@ def _fetch_velocity_window(instrument_token: str, now: int) -> List[Dict[str, An
         if not last_key:
             break
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in fraud_risk_scoring.py", MAX_LOOP_ITERATIONS)
     return items
 
 
@@ -151,6 +154,11 @@ def _decision(score: int) -> str:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     payload = event.get("detail", event) or {}
     instrument_token = str(payload.get("instrument_token", ""))
     if not instrument_token:

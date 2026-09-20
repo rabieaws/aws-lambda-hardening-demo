@@ -8,6 +8,13 @@ carrier's dimensional-weight divisor, and returns the cheapest landed cost.
 Transient carrier failures are retried with exponential backoff.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import json
 import logging
 import math
@@ -20,6 +27,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    validate_api_gateway_event,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -95,7 +108,7 @@ def _call_rating_api(carrier: str, payload: Dict[str, Any]) -> Dict[str, Any]:
 def _quote_carrier(carrier: str, payload: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Quote one carrier, retrying transient rating-API failures with backoff."""
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             return _call_rating_api(carrier, payload)
         except urllib.error.HTTPError as exc:
@@ -110,6 +123,8 @@ def _quote_carrier(carrier: str, payload: Dict[str, Any]) -> Optional[Dict[str, 
         attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in carrier_rate_shopper.py", MAX_LOOP_ITERATIONS)
 def _landed_cost(
     carrier: str, quote: Dict[str, Any], parcel: Dict[str, Any], shipment: Dict[str, Any]
 ) -> Dict[str, Any]:
@@ -162,6 +177,18 @@ def _persist_quote(quote_id: str, best: Dict[str, Any], count: int) -> None:
 
 
 def lambda_handler(event, context):
+    try:
+        validate_payload_size(event)
+    except ValueError:
+        return {"statusCode": 413, "body": json.dumps({"error": "Payload too large"})}
+
+    validation_error = validate_api_gateway_event(event)
+    if validation_error:
+        return validation_error
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": json.dumps({"error": "Insufficient execution time"})}
+
     headers = _lower_headers(event)
     query = event.get("queryStringParameters") or {}
     trace_id = headers.get("x-correlation-id", "unknown")

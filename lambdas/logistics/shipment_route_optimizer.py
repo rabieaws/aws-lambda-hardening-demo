@@ -8,6 +8,13 @@ yields a shorter feasible tour. Capacity and delivery time-window feasibility
 are re-checked on every candidate tour before it is accepted.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import json
 import logging
 import math
@@ -17,6 +24,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -173,6 +181,11 @@ def _persist_plan(plan: Dict[str, Any]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     route_id = str(event.get("route_id", "unknown"))
     depot = event.get("depot") or {}
     stops = _parse_stops(event.get("stops") or [])

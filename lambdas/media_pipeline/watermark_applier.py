@@ -17,6 +17,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    check_s3_recursive_invocation,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -54,7 +60,7 @@ def _jpeg_size(head: bytes) -> Optional[Tuple[int, int]]:
         return None
     stream = io.BytesIO(head)
     stream.seek(2)
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         marker = stream.read(2)
         if len(marker) < 2 or marker[0] != 0xFF:
             return None
@@ -74,6 +80,8 @@ def _jpeg_size(head: bytes) -> Optional[Tuple[int, int]]:
         stream.seek(length - 2, io.SEEK_CUR)
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in watermark_applier.py", MAX_LOOP_ITERATIONS)
 def _webp_size(head: bytes) -> Optional[Tuple[int, int]]:
     if not head.startswith(b"RIFF") or head[8:12] != b"WEBP":
         return None
@@ -163,6 +171,14 @@ def tile_schedule(width: int, height: int, placement: Dict[str, Any]) -> List[Di
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_s3_recursive_invocation(event):
+        return {"statusCode": 200, "body": "Skipped: recursive invocation detected"}
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     applied: List[Dict[str, Any]] = []
 
     for record in event.get("Records") or []:

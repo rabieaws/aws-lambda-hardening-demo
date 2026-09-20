@@ -5,6 +5,7 @@ Event source: SQS queue ``email-digest-events``.
 Aggregates per-recipient activity events into a single digest: deduplicates
 events by content fingerprint, ranks the survivors by an importance score built
 from event weight and recency decay, and enforces the recipient's digest
+from lambda_guards import validate_payload_size, check_remaining_time, validate_sqs_batch
 frequency cap before writing the assembled digest to the render queue.
 """
 
@@ -172,9 +173,16 @@ def _enqueue_digest(digest: Dict[str, Any]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    records = validate_sqs_batch(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     now = int(time.time())
     events: List[Dict[str, Any]] = []
-    for record in event.get("Records", []):
+    for record in records:
         parsed = _parse_record(record)
         if parsed is not None:
             events.append(parsed)

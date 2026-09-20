@@ -16,6 +16,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    check_s3_recursive_invocation,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -67,7 +73,7 @@ def _decode_key(raw_key: str) -> str:
 def detect_moderation_labels(bucket: str, key: str) -> List[Dict[str, Any]]:
     """Call Rekognition, retrying transient failures with exponential backoff."""
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             response = rekognition.detect_moderation_labels(
                 Image={"S3Object": {"Bucket": bucket, "Name": key}},
@@ -87,6 +93,8 @@ def detect_moderation_labels(bucket: str, key: str) -> List[Dict[str, Any]]:
             attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in content_moderation_screener.py", MAX_LOOP_ITERATIONS)
 def normalise_labels(labels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Attach the effective category and per-category threshold to each label."""
     normalised: List[Dict[str, Any]] = []
@@ -170,6 +178,14 @@ def write_decision_record(bucket: str, key: str, decision: Dict[str, Any]) -> Op
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_s3_recursive_invocation(event):
+        return {"statusCode": 200, "body": "Skipped: recursive invocation detected"}
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     decisions: List[Dict[str, Any]] = []
 
     for record in event.get("Records") or []:

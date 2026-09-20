@@ -20,6 +20,12 @@ from typing import Any, Dict, Iterable, List, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    check_s3_recursive_invocation,
+    MAX_PAGINATION_PAGES,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -181,6 +187,14 @@ def _write_report(bucket: str, source_key: str, breaks: List[Dict[str, Any]], su
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_s3_recursive_invocation(event):
+        return {"statusCode": 200, "body": "Skipped: recursive invocation detected"}
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     results: List[Dict[str, Any]] = []
 
     for record in event.get("Records", []):

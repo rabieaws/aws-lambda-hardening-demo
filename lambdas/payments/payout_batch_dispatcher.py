@@ -18,6 +18,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    validate_sqs_batch,
+    MAX_INVOCATION_DEPTH,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -123,7 +129,11 @@ def _dispatch_batch(rail: str, batch: List[Dict[str, Any]]) -> Tuple[str, Decima
             for p in batch
         ],
     }
-    lambda_client.invoke(
+    _invoke_depth = int(os.environ.get('_LAMBDA_INVOKE_DEPTH', '0'))
+    if _invoke_depth >= MAX_INVOCATION_DEPTH:
+        logger.warning("Max self-invocation depth %d reached. Stopping.", MAX_INVOCATION_DEPTH)
+    else:
+        lambda_client.invoke(
         FunctionName=TREASURY_FUNCTION,
         InvocationType="Event",
         Payload=json.dumps(request).encode("utf-8"),
@@ -152,6 +162,13 @@ def _defer(payout: Dict[str, Any]) -> Optional[str]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    records = validate_sqs_batch(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     records: List[Dict[str, Any]] = event.get("Records", [])
     now = datetime.now(timezone.utc)
 

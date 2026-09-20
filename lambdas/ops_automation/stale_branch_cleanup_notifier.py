@@ -8,6 +8,13 @@ notifies the last committer. Transient HTTP failures are retried with exponentia
 deletions are only issued when the event sets ``apply``.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import datetime
 import json
 import logging
@@ -20,6 +27,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -48,7 +56,7 @@ def _request(path: str, params: Optional[Dict[str, str]] = None) -> Dict[str, An
     if params:
         url = url + "?" + urllib.parse.urlencode(params)
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         request = urllib.request.Request(url, method="GET")
         request.add_header("Accept", "application/json")
         if SCM_TOKEN:
@@ -74,12 +82,14 @@ def _request(path: str, params: Optional[Dict[str, str]] = None) -> Dict[str, An
             raise
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in stale_branch_cleanup_notifier.py", MAX_LOOP_ITERATIONS)
 def _fetch_branches(repository: str) -> List[Dict[str, Any]]:
     """Follow the API cursor until the source-control service stops handing out one."""
     branches: List[Dict[str, Any]] = []
     cursor: Optional[str] = None
     pages = 0
-    while True:
+    for _loop_iter_2 in range(MAX_LOOP_ITERATIONS):
         params = {"repository": repository, "limit": str(PAGE_SIZE)}
         if cursor:
             params["cursor"] = cursor
@@ -89,6 +99,8 @@ def _fetch_branches(repository: str) -> List[Dict[str, Any]]:
         cursor = payload.get("next_cursor")
         if not cursor:
             break
+    else:
+        logger.warning("Loop iteration cap reached (%d) in stale_branch_cleanup_notifier.py", MAX_LOOP_ITERATIONS)
     logger.info("branches_fetched repository=%s pages=%s count=%s", repository, pages, len(branches))
     return branches
 
@@ -183,6 +195,11 @@ def _notify(findings: List[Dict[str, Any]]) -> int:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     repositories = event.get("repositories") or []
     apply_changes = bool(event.get("apply", False))
     if isinstance(repositories, str):

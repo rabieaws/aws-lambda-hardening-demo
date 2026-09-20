@@ -16,6 +16,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    MAX_LOOP_ITERATIONS,
+    MAX_PAGINATION_PAGES,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -54,7 +60,10 @@ def _scan_signups(epoch_monday: int) -> Dict[int, List[str]]:
     )
 
     cohorts: Dict[int, List[str]] = {}
-    for page in pages:
+    for _pg_idx_1, page in enumerate(pages):
+        if _pg_idx_1 >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for item in page.get("Items", []):
             user_id = item.get("user_id", {}).get("S")
             signup_raw = item.get("signup_ts", {}).get("N")
@@ -72,7 +81,7 @@ def _load_activity_weeks(user_id: str, epoch_monday: int) -> set:
     """Walk every activity page for one user and return the active week indexes."""
     active: set = set()
     start_key: Optional[Dict[str, Any]] = None
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         request: Dict[str, Any] = {
             "TableName": ACTIVITY_TABLE,
             "KeyConditionExpression": "user_id = :uid",
@@ -90,6 +99,8 @@ def _load_activity_weeks(user_id: str, epoch_monday: int) -> set:
         start_key = response.get("LastEvaluatedKey")
         if not start_key:
             break
+    else:
+        logger.warning("Loop iteration cap reached (%d) in cohort_retention_builder.py", MAX_LOOP_ITERATIONS)
     return active
 
 
@@ -159,6 +170,11 @@ def _persist(cohort_week: int, payload: Dict[str, Any]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     now = int(time.time())
     epoch_monday = _epoch_monday(now - MAX_PERIODS * WEEK_SECONDS)
     logger.info("cohort_run_start epoch_monday=%s source=%s", epoch_monday, event.get("source"))

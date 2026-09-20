@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, validate_sqs_batch
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -174,7 +175,12 @@ def _deliver(accepted: List[Dict[str, Any]]) -> int:
 
 
 def lambda_handler(event, context):
-    records = event.get("Records", [])
+    validate_payload_size(event)
+
+    records = validate_sqs_batch(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
     logger.info("validation_batch_start records=%s", len(records))
 
     accepted: List[Dict[str, Any]] = []

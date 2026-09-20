@@ -19,6 +19,14 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    validate_sqs_batch,
+    check_invocation_depth,
+    get_invocation_depth,
+    increment_invocation_depth,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -179,9 +187,19 @@ def _apply(event: Dict[str, Any], cursor: Dict[str, Any], now: int) -> Tuple[str
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    records = validate_sqs_batch(event)
+
+    if not check_invocation_depth(event):
+        return {"statusCode": 200, "body": "Skipped: max invocation depth reached"}
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     now = int(time.time())
     parsed: List[Dict[str, Any]] = []
-    for record in event.get("Records", []):
+    for record in records:
         item = _parse_record(record)
         if item is not None:
             parsed.append(item)

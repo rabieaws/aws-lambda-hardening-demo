@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, validate_api_gateway_event
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -168,6 +169,18 @@ def _claim_customer(event: Dict[str, Any]) -> Optional[str]:
 
 
 def lambda_handler(event, context):
+    try:
+        validate_payload_size(event)
+    except ValueError:
+        return {"statusCode": 413, "body": json.dumps({"error": "Payload too large"})}
+
+    validation_error = validate_api_gateway_event(event)
+    if validation_error:
+        return validation_error
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": json.dumps({"error": "Insufficient execution time"})}
+
     customer_id = _claim_customer(event)
     if not customer_id:
         return _response(401, {"message": "authenticated principal required"})

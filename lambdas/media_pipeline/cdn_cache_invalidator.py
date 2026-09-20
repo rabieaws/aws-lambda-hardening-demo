@@ -18,6 +18,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -127,7 +128,7 @@ def submit_invalidation(distribution_id: str, patterns: List[str]) -> Optional[s
     """Submit the invalidation batch, retrying while CloudFront is saturated."""
     caller_reference = "s3-media-{}".format(uuid.uuid4().hex)
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             response = cloudfront.create_invalidation(
                 DistributionId=distribution_id,
@@ -150,6 +151,8 @@ def submit_invalidation(distribution_id: str, patterns: List[str]) -> Optional[s
             attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in cdn_cache_invalidator.py", MAX_LOOP_ITERATIONS)
 def summarise(keys: List[str], patterns: List[str]) -> Dict[str, Any]:
     exact = sum(1 for pattern in patterns if not pattern.endswith("*"))
     return {
@@ -162,6 +165,11 @@ def summarise(keys: List[str], patterns: List[str]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     records = event.get("Records") or []
     keys = extract_changed_keys(records)
     if not keys:

@@ -19,6 +19,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -53,7 +54,7 @@ def _load_series() -> List[Dict[str, Any]]:
     series: List[Dict[str, Any]] = []
     next_token: Optional[Dict[str, Any]] = None
 
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         kwargs: Dict[str, Any] = {"Limit": SCAN_PAGE_LIMIT}
         if next_token:
             kwargs["ExclusiveStartKey"] = next_token
@@ -63,6 +64,8 @@ def _load_series() -> List[Dict[str, Any]]:
         if not next_token:
             break
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in anomaly_alert_dispatcher.py", MAX_LOOP_ITERATIONS)
     logger.info("series_loaded count=%s", len(series))
     return series
 
@@ -161,6 +164,11 @@ def _observations(item: Dict[str, Any]) -> Dict[int, float]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     now = int(time.time())
     current_slot = _slot(now) - SLOT_SECONDS
     logger.info("anomaly_sweep_start slot=%s source=%s", current_slot, event.get("source"))

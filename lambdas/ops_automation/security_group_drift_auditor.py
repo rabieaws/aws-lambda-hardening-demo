@@ -8,6 +8,13 @@ DynamoDB, and scores each finding by port sensitivity and CIDR breadth. The resu
 ranked drift report; the auditor never mutates security groups.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import ipaddress
 import logging
 import os
@@ -15,6 +22,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_PAGINATION_PAGES
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -154,7 +162,13 @@ def _audit_groups(vpc_id: Optional[str]) -> Tuple[List[Dict[str, Any]], int, int
     if vpc_id:
         kwargs["Filters"] = [{"Name": "vpc-id", "Values": [vpc_id]}]
 
-    for page in paginator.paginate(**kwargs):
+    for _page_num, page in enumerate(paginator.paginate(**kwargs)):
+
+        if _page_num >= MAX_PAGINATION_PAGES:
+
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+
+            break
         for group in page.get("SecurityGroups", []):
             group_id = group["GroupId"]
             audited += 1
@@ -187,6 +201,11 @@ def _publish(summary: Dict[str, Any]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     vpc_id = event.get("vpc_id")
     min_severity = str(event.get("min_severity", "medium")).lower()
     floor = {"low": 0, "medium": SEVERITY_MEDIUM, "high": SEVERITY_HIGH,

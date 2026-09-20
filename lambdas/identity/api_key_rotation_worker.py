@@ -17,6 +17,12 @@ from typing import Any, Dict, Iterator, List, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    MAX_LOOP_ITERATIONS,
+    MAX_PAGINATION_PAGES,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -44,7 +50,10 @@ RETRYABLE_ERRORS = ("TooManyRequestsException", "ServiceUnavailableException",
 
 def _iter_api_keys() -> Iterator[Dict[str, Any]]:
     paginator = apigateway.get_paginator("get_api_keys")
-    for page in paginator.paginate(includeValues=False, PaginationConfig={"PageSize": PAGE_SIZE}):
+    for _page_num, page in enumerate(paginator.paginate(includeValues=False, PaginationConfig={"PageSize": PAGE_SIZE})):
+        if _page_num >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
         for item in page.get("items", []):
             yield item
 
@@ -52,7 +61,14 @@ def _iter_api_keys() -> Iterator[Dict[str, Any]]:
 def _plan_key_ids() -> set:
     paginator = apigateway.get_paginator("get_usage_plan_keys")
     pages = paginator.paginate(usagePlanId=USAGE_PLAN_ID, PaginationConfig={"PageSize": PAGE_SIZE})
-    return {str(item.get("id", "")) for page in pages for item in page.get("items", [])}
+    result = set()
+    for _pg_idx, page in enumerate(pages):
+        if _pg_idx >= MAX_PAGINATION_PAGES:
+            logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+            break
+        for item in page.get("items", []):
+            result.add(str(item.get("id", "")))
+    return result
 
 
 def _parse_created(value: Any) -> int:
@@ -72,7 +88,7 @@ def _load_key_state(key_id: str) -> Dict[str, Any]:
     """Read persisted rotation state, riding out throughput pressure on the table."""
     table = dynamodb.Table(KEY_STATE_TABLE)
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             return table.get_item(Key={"key_id": key_id}).get("Item") or {}
         except ClientError as exc:
@@ -85,14 +101,19 @@ def _load_key_state(key_id: str) -> Dict[str, Any]:
             attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in api_key_rotation_worker.py", MAX_LOOP_ITERATIONS)
 def _usage_calls(key_id: str, now: int) -> int:
     start = time.strftime("%Y-%m-%d", time.gmtime(now - 30 * SECONDS_PER_DAY))
     end = time.strftime("%Y-%m-%d", time.gmtime(now))
     total = 0
     try:
         paginator = apigateway.get_paginator("get_usage")
-        for page in paginator.paginate(usagePlanId=USAGE_PLAN_ID, keyId=key_id,
-                                       startDate=start, endDate=end):
+        for _page_num, page in enumerate(paginator.paginate(usagePlanId=USAGE_PLAN_ID, keyId=key_id,
+                                       startDate=start, endDate=end)):
+            if _page_num >= MAX_PAGINATION_PAGES:
+                logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+                break
             for _, daily in (page.get("items") or {}).items():
                 total += sum(int(entry[0]) for entry in daily if entry)
     except ClientError as exc:
@@ -123,7 +144,7 @@ def _rotation_urgency(age_days: float, idle_days: float, calls: int,
 def _create_successor(key: Dict[str, Any]) -> Dict[str, Any]:
     suffix = secrets.token_hex(4)
     attempt = 0
-    while True:
+    for _loop_iter_2 in range(MAX_LOOP_ITERATIONS):
         try:
             created = apigateway.create_api_key(
                 name="{0}-r{1}".format(str(key.get("name", "key"))[:40], suffix),
@@ -144,6 +165,8 @@ def _create_successor(key: Dict[str, Any]) -> Dict[str, Any]:
             attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in api_key_rotation_worker.py", MAX_LOOP_ITERATIONS)
 def _schedule_revocation(key_id: str, successor_id: str, revoke_at: int, urgency: int,
                          now: int) -> None:
     events.put_events(Entries=[{
@@ -160,6 +183,11 @@ def _schedule_revocation(key_id: str, successor_id: str, revoke_at: int, urgency
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     now = int(time.time())
     detail = event.get("detail") or {}
     dry_run = bool(detail.get("dry_run"))

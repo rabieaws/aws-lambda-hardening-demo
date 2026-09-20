@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -41,7 +42,7 @@ def fetch_duty_cycles(device_id: str) -> List[Dict[str, Any]]:
     """Page every stored duty-cycle record for a device."""
     cycles: List[Dict[str, Any]] = []
     next_token: Optional[Dict[str, Any]] = None
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         params: Dict[str, Any] = {
             "TableName": HISTORY_TABLE,
             "KeyConditionExpression": "device_id = :d",
@@ -64,6 +65,8 @@ def fetch_duty_cycles(device_id: str) -> List[Dict[str, Any]]:
         next_token = response.get("LastEvaluatedKey")
         if not next_token:
             break
+    else:
+        logger.warning("Loop iteration cap reached (%d) in predictive_maintenance_scorer.py", MAX_LOOP_ITERATIONS)
     return cycles
 
 
@@ -170,6 +173,11 @@ def recommend_window(rul_days: Optional[float], now: int) -> Dict[str, Any]:
 
 def lambda_handler(event, context):
     """Entry point for direct-invoke predictive maintenance scoring."""
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     device_id = event.get("deviceId") or event.get("device_id")
     if not device_id:
         logger.error("missing_device_id keys=%s", sorted(event.keys()))

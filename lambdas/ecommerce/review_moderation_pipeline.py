@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, validate_sqs_batch
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -184,6 +185,13 @@ def enqueue_for_human(decision: Dict[str, Any]) -> None:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    records = validate_sqs_batch(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     records = event.get("Records") or []
     failures: List[Dict[str, str]] = []
     tally = {"APPROVED": 0, "HELD": 0, "REJECTED": 0}

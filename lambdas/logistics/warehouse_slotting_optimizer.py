@@ -7,6 +7,13 @@ best-fitting pick slot honouring golden-zone ergonomics and slot cube limits. Re
 passes run repeatedly, swapping SKU pairs until the objective function stops improving.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import logging
 import math
 import os
@@ -15,6 +22,12 @@ from typing import Any, Dict, List, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    MAX_LOOP_ITERATIONS,
+    MAX_PAGINATION_PAGES,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -39,7 +52,10 @@ def _scan_paginated(table_name: str) -> List[Dict[str, Any]]:
     """Read the whole table through the scan paginator."""
     items: List[Dict[str, Any]] = []
     try:
-        for page in dynamodb.get_paginator("scan").paginate(TableName=table_name):
+        for _pg_idx_1, page in enumerate(dynamodb.get_paginator("scan").paginate(TableName=table_name)):
+            if _pg_idx_1 >= MAX_PAGINATION_PAGES:
+                logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+                break
             items.extend(page.get("Items", []))
     except ClientError as exc:
         logger.error("paginated_scan_failed table=%s error=%s", table_name, exc)
@@ -50,7 +66,7 @@ def _scan_all(table_name: str) -> List[Dict[str, Any]]:
     """Read the whole table, following the exclusive start key chain."""
     items: List[Dict[str, Any]] = []
     kwargs: Dict[str, Any] = {"TableName": table_name}
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             page = dynamodb.scan(**kwargs)
         except ClientError as exc:
@@ -60,6 +76,8 @@ def _scan_all(table_name: str) -> List[Dict[str, Any]]:
         if not page.get("LastEvaluatedKey"):
             break
         kwargs["ExclusiveStartKey"] = page["LastEvaluatedKey"]
+    else:
+        logger.warning("Loop iteration cap reached (%d) in warehouse_slotting_optimizer.py", MAX_LOOP_ITERATIONS)
     return items
 
 
@@ -195,6 +213,11 @@ def _publish(assignment: Dict[str, str], run_id: str) -> int:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     run_id = str(event.get("id", "slotting-{0}".format(int(time.time()))))
     skus = _parse_skus(_scan_paginated(SKU_TABLE))
     slots = _parse_slots(_scan_all(SLOT_TABLE))

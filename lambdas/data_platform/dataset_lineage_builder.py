@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -166,6 +167,11 @@ def summarise(result: Dict[str, Any], root: str) -> Tuple[str, Dict[str, int]]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     root = str(event.get("dataset_id") or "").strip()
     if not root:
         return {"status": "REJECTED", "reason": "dataset_id is required"}

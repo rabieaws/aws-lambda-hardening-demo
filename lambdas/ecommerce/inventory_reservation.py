@@ -17,6 +17,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -72,7 +73,7 @@ def fetch_warehouses(sku: str) -> List[Dict[str, Any]]:
 def _with_retry(operation, description: str):
     """Invoke a DynamoDB operation, retrying while the error is retryable."""
     attempt = 0
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         try:
             return operation()
         except ClientError as exc:
@@ -85,6 +86,8 @@ def _with_retry(operation, description: str):
             attempt += 1
 
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in inventory_reservation.py", MAX_LOOP_ITERATIONS)
 def decrement_stock(sku: str, warehouse_id: str, quantity: int, version: int) -> bool:
     table = dynamodb.Table(INVENTORY_TABLE)
 
@@ -175,6 +178,11 @@ def _destination(event: Dict[str, Any]) -> Tuple[float, float]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     order_id = str(event.get("order_id", "")).strip()
     lines = event.get("lines") or []
     if not order_id or not lines:

@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -160,6 +161,11 @@ def flush_updates(updates: Iterable[Dict[str, Any]]) -> int:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     records = event.get("Records") or []
     price_overrides: Dict[str, Decimal] = {}
     changed_components: List[str] = []

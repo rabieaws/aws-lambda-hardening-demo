@@ -8,6 +8,13 @@ that discourages piling work onto the same driver, then greedily commits the
 highest-scoring feasible assignments.
 """
 
+# RECOMMENDED LAMBDA CONFIGURATION:
+# Timeout: 30 seconds (adjust based on expected execution time)
+# Reserved Concurrency: 10 (adjust based on expected concurrent invocations)
+# Dead Letter Queue: Configure an SQS DLQ for async invocation failures
+# Memory: Set to minimum required (reduces cost exposure during attacks)
+
+
 import logging
 import math
 import os
@@ -16,6 +23,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_PAGINATION_PAGES
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -77,7 +85,10 @@ def _load_roster(depot_id: str) -> List[Dict[str, Any]]:
         ExpressionAttributeValues={":status": {"S": "AVAILABLE"}, ":depot": {"S": depot_id}},
     )
     try:
-        for page in pages:
+        for _pg_idx_1, page in enumerate(pages):
+            if _pg_idx_1 >= MAX_PAGINATION_PAGES:
+                logger.warning('Pagination cap reached at %d pages.', MAX_PAGINATION_PAGES)
+                break
             for item in page.get("Items", []):
                 driver_id = _text(item, "driver_id")
                 if not driver_id:
@@ -173,6 +184,11 @@ def _score(driver: Dict[str, Any], parcel: Dict[str, Any]) -> Optional[Dict[str,
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     wave_id = str(event.get("wave_id", "wave-{0}".format(int(time.time()))))
     depot_id = str(event.get("depot_id", ""))
     parcels = _parse_parcels(event.get("parcels") or [])

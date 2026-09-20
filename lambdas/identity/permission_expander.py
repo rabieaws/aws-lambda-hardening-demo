@@ -19,6 +19,7 @@ from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 import boto3
 from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -39,7 +40,7 @@ def _query_all(table_name: str, condition: Any,
     table = dynamodb.Table(table_name)
     items: List[Dict[str, Any]] = []
     next_token: Optional[Dict[str, Any]] = None
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         request: Dict[str, Any] = {"KeyConditionExpression": condition}
         if index_name:
             request["IndexName"] = index_name
@@ -50,6 +51,8 @@ def _query_all(table_name: str, condition: Any,
         next_token = response.get("LastEvaluatedKey")
         if not next_token:
             break
+    else:
+        logger.warning("Loop iteration cap reached (%d) in permission_expander.py", MAX_LOOP_ITERATIONS)
     return items
 
 
@@ -169,6 +172,11 @@ def _summarize(effective: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     started = time.time()
     principal_id = str(event.get("principal_id") or "").strip()
     if not principal_id:

@@ -16,6 +16,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import validate_payload_size, check_remaining_time, MAX_LOOP_ITERATIONS
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -61,7 +62,7 @@ def _load_intent(topic_arn: str) -> List[Dict[str, Any]]:
 def _list_live_subscriptions(topic_arn: str) -> List[Dict[str, Any]]:
     live: List[Dict[str, Any]] = []
     next_token: Optional[str] = None
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         kwargs: Dict[str, Any] = {"TopicArn": topic_arn}
         if next_token:
             kwargs["NextToken"] = next_token
@@ -70,6 +71,8 @@ def _list_live_subscriptions(topic_arn: str) -> List[Dict[str, Any]]:
         next_token = response.get("NextToken")
         if not next_token:
             break
+    else:
+        logger.warning("Loop iteration cap reached (%d) in topic_subscription_reconciler.py", MAX_LOOP_ITERATIONS)
     return live
 
 
@@ -198,6 +201,11 @@ def _reconcile_topic(topic_arn: str) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    validate_payload_size(event)
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": "Insufficient execution time"}
+
     started_at = int(time.time())
     topics = event.get("topic_arns") or MANAGED_TOPIC_ARNS
     if not topics:

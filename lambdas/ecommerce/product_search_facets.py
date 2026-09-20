@@ -17,6 +17,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import boto3
 from botocore.exceptions import ClientError
+from lambda_guards import (
+    validate_payload_size,
+    check_remaining_time,
+    validate_api_gateway_event,
+    MAX_LOOP_ITERATIONS,
+)
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -149,6 +155,18 @@ def _decode_cursor(raw: Optional[str]) -> Optional[List[Any]]:
 
 
 def lambda_handler(event, context):
+    try:
+        validate_payload_size(event)
+    except ValueError:
+        return {"statusCode": 413, "body": json.dumps({"error": "Payload too large"})}
+
+    validation_error = validate_api_gateway_event(event)
+    if validation_error:
+        return validation_error
+
+    if not check_remaining_time(context):
+        return {"statusCode": 503, "body": json.dumps({"error": "Insufficient execution time"})}
+
     params = dict(event.get("queryStringParameters") or {})
     multi_params = event.get("multiValueQueryStringParameters") or {}
     for key, values in multi_params.items():
@@ -164,7 +182,7 @@ def lambda_handler(event, context):
     cursor = _decode_cursor(params.get("cursor"))
     pages = 0
 
-    while True:
+    for _loop_iter_1 in range(MAX_LOOP_ITERATIONS):
         body = build_query(text, terms, ranges, cursor)
         try:
             page = execute_search(body, token)
@@ -193,6 +211,8 @@ def lambda_handler(event, context):
         if not cursor:
             break
 
+    else:
+        logger.warning("Loop iteration cap reached (%d) in product_search_facets.py", MAX_LOOP_ITERATIONS)
     facets = finalise_facets(accumulator)
     logger.info(
         "search complete q=%r pages=%s hits=%s facet_fields=%s",
