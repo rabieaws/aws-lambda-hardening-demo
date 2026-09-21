@@ -25,6 +25,7 @@ from lambda_guards import (
     check_remaining_time,
     validate_record_size,
     PermanentError,
+    IterationCapExceeded,
 )
 
 logger = logging.getLogger()
@@ -261,6 +262,10 @@ def lambda_handler(event, context):
             # Transient failure -- add to batchItemFailures for retry
             logger.exception("refund_dispatch_failed message_id=%s error=%s", message_id, exc)
             _emit_guard_metric("RefundDispatchFailed", 1)
+            failures.append({"itemIdentifier": message_id})
+        except IterationCapExceeded as exc:
+            # Transient -- iteration cap on decision-driving query, retry may succeed with less data
+            logger.warning("refund_iteration_cap_exceeded message_id=%s error=%s", message_id, exc)
             failures.append({"itemIdentifier": message_id})
 
     logger.info(

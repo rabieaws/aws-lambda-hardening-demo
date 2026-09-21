@@ -229,7 +229,7 @@ def expand_command(command: Dict[str, Any], depth: int) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
-    from lambda_guards import MAX_INVOCATION_DEPTH, validate_payload_size, _emit_guard_metric
+    from lambda_guards import MAX_INVOCATION_DEPTH, validate_payload_size, check_remaining_time, _emit_guard_metric
 
     validate_payload_size(event)
 
@@ -237,6 +237,9 @@ def lambda_handler(event, context):
     results: List[Dict[str, Any]] = []
 
     for command, depth in commands:
+        if not check_remaining_time(context):
+            raise TimeoutError("Insufficient time remaining to process remaining commands")
+
         if depth >= MAX_INVOCATION_DEPTH:
             _emit_guard_metric("DepthLimitReached", 1)
             results.append({"status": "depth_exceeded", "command_id": command.get("command_id")})

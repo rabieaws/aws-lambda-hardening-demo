@@ -130,12 +130,16 @@ def summarise(metric: str, values: List[float]) -> Dict[str, Any]:
 
 
 def persist_rollups(
-    grouped: Dict[Tuple[str, str], List[float]], hour_label: str
+    grouped: Dict[Tuple[str, str], List[float]], hour_label: str, context=None
 ) -> int:
+    from lambda_guards import check_remaining_time, safe_iterate
     table = dynamodb.Table(ROLLUP_TABLE)
     written = 0
     with table.batch_writer() as batch:
-        for (device_id, metric), values in grouped.items():
+        for (device_id, metric), values in safe_iterate(grouped.items()):
+            if context and not check_remaining_time(context):
+                logger.warning("persist_rollups_time_remaining_low, stopping early")
+                break
             if not values:
                 continue
             item: Dict[str, Any] = {
@@ -166,7 +170,9 @@ def emit_pipeline_metrics(devices: int, series: int, readings: int, hour_label: 
 
 
 def lambda_handler(event, context):
-    from lambda_guards import check_remaining_time
+    from lambda_guards import check_remaining_time, validate_payload_size
+
+    validate_payload_size(event)
 
     start_epoch, end_epoch, hour_label = _hour_window(int(time.time()))
     logger.info("rollup_start hour=%s window=%s-%s", hour_label, start_epoch, end_epoch)
@@ -181,7 +187,7 @@ def lambda_handler(event, context):
                 "readings_aggregated": total_readings, "status": "TIMEOUT_EARLY_EXIT"}
 
     try:
-        written = persist_rollups(grouped, hour_label)
+        written = persist_rollups(grouped, hour_label, context=context)
     except ClientError as exc:
         logger.exception("rollup_write_failed hour=%s error=%s", hour_label, exc)
         written = 0

@@ -63,7 +63,8 @@ def parse_settlement_csv(raw: str) -> List[Dict[str, str]]:
         raise ValueError("settlement file missing columns: {0}".format(", ".join(missing)))
 
     rows: List[Dict[str, str]] = []
-    for line_number, row in enumerate(reader, start=2):
+    from lambda_guards import safe_iterate
+    for line_number, row in safe_iterate(enumerate(reader, start=2), fail_on_cap=True):
         reference = (row.get("psp_reference") or "").strip()
         if not reference:
             logger.warning("settlement_row_no_reference line=%s", line_number)
@@ -150,7 +151,7 @@ def classify(row: Dict[str, str], internal: List[Dict[str, Any]]) -> Tuple[str, 
 
 def reconcile(rows: Iterable[Dict[str, str]], context=None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Reconcile every settled line. Returns (breaks, summary)."""
-    from lambda_guards import check_remaining_time
+    from lambda_guards import check_remaining_time, IterationCapExceeded
     breaks: List[Dict[str, Any]] = []
     matched = 0
     settled_total = Decimal("0.00")
@@ -164,6 +165,9 @@ def reconcile(rows: Iterable[Dict[str, str]], context=None) -> Tuple[List[Dict[s
         reference = (row.get("psp_reference") or "").strip()
         try:
             internal = query_internal_captures(reference)
+        except IterationCapExceeded as exc:
+            logger.error("internal_lookup_cap_exceeded reference=%s error=%s", reference, exc)
+            raise
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code")
             logger.error("internal_lookup_failed reference=%s code=%s", reference, code)

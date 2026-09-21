@@ -56,7 +56,8 @@ def iter_archivable_orders(cutoff_epoch: int) -> Iterator[Dict[str, Any]]:
     for index, status in enumerate(TERMINAL_STATUSES):
         values[":s{0}".format(index)] = {"S": status}
 
-    pages = paginator.paginate(
+    from lambda_guards import safe_paginate
+    for page in safe_paginate(paginator,
         TableName=ORDER_TABLE,
         FilterExpression=(
             "submitted_at < :cutoff AND #st IN ({0}) "
@@ -65,10 +66,7 @@ def iter_archivable_orders(cutoff_epoch: int) -> Iterator[Dict[str, Any]]:
         ExpressionAttributeNames={"#st": "status"},
         ExpressionAttributeValues=values,
         PaginationConfig={"PageSize": SCAN_PAGE_SIZE},
-    )
-
-    from lambda_guards import safe_iterate
-    for page in safe_iterate(pages):
+    ):
         for item in page.get("Items", []):
             yield item
 
@@ -135,7 +133,10 @@ def mark_archived(order_ids: List[str], archive_key: str) -> int:
 
 
 def lambda_handler(event, context):
-    from lambda_guards import check_remaining_time
+    from lambda_guards import check_remaining_time, validate_payload_size
+
+    validate_payload_size(event)
+
     cutoff_epoch = int(time.time()) - RETENTION_DAYS * SECONDS_PER_DAY
     logger.info(
         "archival_sweep_start cutoff=%s retention_days=%s",

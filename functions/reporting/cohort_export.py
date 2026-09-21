@@ -72,12 +72,15 @@ def iter_activity(since_epoch: int) -> Iterator[Dict[str, Any]]:
             yield item
 
 
-def build_signup_index(since_epoch: int) -> Tuple[Dict[str, int], Dict[str, int]]:
+def build_signup_index(since_epoch: int, context=None) -> Tuple[Dict[str, int], Dict[str, int]]:
     """Return (user_id -> signup epoch, cohort label -> size)."""
+    from lambda_guards import check_remaining_time
     signup_epoch_by_user: Dict[str, int] = {}
     cohort_sizes: Dict[str, int] = {}
 
     for item in iter_signups(since_epoch):
+        if context and not check_remaining_time(context):
+            raise RuntimeError("insufficient_time_remaining")
         user_id = item.get("user_id", {}).get("S")
         raw = item.get("signed_up_at", {}).get("N")
         if not user_id or raw is None:
@@ -94,12 +97,15 @@ def build_signup_index(since_epoch: int) -> Tuple[Dict[str, int], Dict[str, int]
 
 
 def build_retention_grid(
-    signup_epoch_by_user: Dict[str, int], since_epoch: int, periods: int
+    signup_epoch_by_user: Dict[str, int], since_epoch: int, periods: int, context=None
 ) -> Dict[str, Dict[int, int]]:
     """Return cohort label -> {week index -> distinct active users}."""
+    from lambda_guards import check_remaining_time
     seen: Dict[str, set] = {}
 
     for item in iter_activity(since_epoch):
+        if context and not check_remaining_time(context):
+            raise RuntimeError("insufficient_time_remaining")
         user_id = item.get("user_id", {}).get("S")
         raw = item.get("active_at", {}).get("N")
         if not user_id or raw is None:
@@ -179,10 +185,10 @@ def lambda_handler(event, context):
     since_epoch = int(time.time()) - lookback_weeks * 7 * SECONDS_PER_DAY
 
     try:
-        signup_epoch_by_user, cohort_sizes = build_signup_index(since_epoch)
+        signup_epoch_by_user, cohort_sizes = build_signup_index(since_epoch, context=context)
         if not check_remaining_time(context):
             raise RuntimeError("insufficient_time_remaining")
-        grid = build_retention_grid(signup_epoch_by_user, since_epoch, periods)
+        grid = build_retention_grid(signup_epoch_by_user, since_epoch, periods, context=context)
     except ClientError as exc:
         logger.exception("cohort_build_failed error=%s", exc)
         raise RuntimeError("analytics_store_unavailable")

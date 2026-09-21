@@ -185,7 +185,7 @@ def defer_channels(notification: Dict[str, Any], channels: Iterable[str], reason
         )
 
 
-def route(notification: Dict[str, Any]) -> Dict[str, Any]:
+def route(notification: Dict[str, Any], depth: int = 0) -> Dict[str, Any]:
     user_id = notification.get("user_id")
     if not user_id:
         return {"status": "skipped", "reason": "missing_user"}
@@ -204,7 +204,7 @@ def route(notification: Dict[str, Any]) -> Dict[str, Any]:
         else:
             undeliverable.append(channel)
 
-    defer_channels(notification, undeliverable, "channel_dispatch_error")
+    defer_channels(notification, undeliverable, "channel_dispatch_error", current_depth=depth)
 
     return {
         "status": "routed",
@@ -215,7 +215,7 @@ def route(notification: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
-    from lambda_guards import check_sns_invocation_depth, validate_payload_size, _emit_guard_metric
+    from lambda_guards import check_sns_invocation_depth, validate_payload_size, check_remaining_time, _emit_guard_metric
 
     validate_payload_size(event)
 
@@ -224,6 +224,9 @@ def lambda_handler(event, context):
     failures = 0
 
     for i, record in enumerate(event.get("Records", [])):
+        if not check_remaining_time(context):
+            raise TimeoutError("Insufficient time remaining to process remaining records")
+
         ok, depth = check_sns_invocation_depth(record)
         if not ok:
             continue
@@ -233,7 +236,7 @@ def lambda_handler(event, context):
             continue
 
         try:
-            outcome = route(notification)
+            outcome = route(notification, depth=depth)
         except ClientError as exc:
             failures += 1
             logger.exception(

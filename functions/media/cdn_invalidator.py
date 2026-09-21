@@ -121,7 +121,7 @@ def summarise(keys: List[str], paths: List[str], stats: Dict[str, int]) -> Dict[
 
 
 def lambda_handler(event, context):
-    from lambda_guards import check_s3_recursive_invocation, validate_payload_size
+    from lambda_guards import check_s3_recursive_invocation, validate_payload_size, check_remaining_time
 
     validate_payload_size(event)
 
@@ -145,6 +145,8 @@ def lambda_handler(event, context):
     invalidation_ids: List[str] = []
 
     for batch in _chunk(paths, MAX_PATHS_PER_INVALIDATION):
+        if not check_remaining_time(context):
+            raise TimeoutError("Insufficient time remaining for invalidation batches")
         invalidation_id = submit_invalidation(batch, _caller_reference(batch))
         if invalidation_id:
             invalidation_ids.append(invalidation_id)

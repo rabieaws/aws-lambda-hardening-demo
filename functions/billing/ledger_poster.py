@@ -210,7 +210,7 @@ def process_record(record: Dict[str, Any]) -> Optional[str]:
 
 
 def lambda_handler(event, context):
-    from lambda_guards import validate_record_size, check_remaining_time, PermanentError, _emit_guard_metric
+    from lambda_guards import validate_record_size, check_remaining_time, PermanentError, IterationCapExceeded, _emit_guard_metric
 
     posted: List[str] = []
     duplicates = 0
@@ -239,6 +239,9 @@ def lambda_handler(event, context):
         except json.JSONDecodeError:
             rejected += 1
             logger.error("entry_body_not_json message_id=%s", message_id)
+        except IterationCapExceeded as exc:
+            logger.warning("entry_iteration_cap_exceeded message_id=%s error=%s", message_id, exc)
+            failures.append({"itemIdentifier": message_id})
         except ClientError as exc:
             logger.exception("entry_post_failed message_id=%s error=%s", message_id, exc)
             failures.append({"itemIdentifier": message_id})

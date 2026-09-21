@@ -198,7 +198,7 @@ def _response(status: int, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
-    from lambda_guards import validate_payload_size
+    from lambda_guards import validate_payload_size, IterationCapExceeded
 
     try:
         validate_payload_size(event)
@@ -224,6 +224,9 @@ def lambda_handler(event, context):
         discount, applied = evaluate_promotions(lines, channel, customer_tier)
     except ClientError as exc:
         logger.exception("promotion_lookup_failed error=%s", exc)
+        return _response(503, {"error": "promotion_store_unavailable"})
+    except IterationCapExceeded as exc:
+        logger.warning("promotion_iteration_cap_exceeded error=%s", exc)
         return _response(503, {"error": "promotion_store_unavailable"})
 
     total = _money(subtotal - discount)

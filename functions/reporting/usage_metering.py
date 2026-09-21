@@ -79,7 +79,7 @@ def iter_metered_events(start_epoch: int, end_epoch: int) -> Iterator[Dict[str, 
     """Yield every metered event in the window."""
     from lambda_guards import safe_paginate
     paginator = dynamodb_client.get_paginator("scan")
-    for page in safe_paginate(paginator,
+    for page in safe_paginate(paginator, fail_on_cap=True,
         TableName=EVENT_TABLE,
         FilterExpression="emitted_at >= :start AND emitted_at < :end AND attribute_not_exists(rated)",
         ExpressionAttributeValues={
@@ -147,7 +147,8 @@ def month_to_date_units(account_id: str, metric: str, window_start: int) -> int:
         return 0
 
     total = 0
-    for item in response.get("Items", []):
+    from lambda_guards import safe_iterate
+    for item in safe_iterate(response.get("Items", []), fail_on_cap=True):
         try:
             total += int(item.get("units", 0))
         except (TypeError, ValueError):
@@ -210,7 +211,9 @@ def persist_rated_usage(
 
 
 def lambda_handler(event, context):
-    from lambda_guards import check_remaining_time
+    from lambda_guards import check_remaining_time, validate_payload_size
+
+    validate_payload_size(event)
 
     window_start, window_end, window_label = _window(int(time.time()))
     logger.info("metering_start window=%s", window_label)

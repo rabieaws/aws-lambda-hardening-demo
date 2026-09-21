@@ -189,6 +189,13 @@ def _response(status: int, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import validate_payload_size
+
+    try:
+        validate_payload_size(event)
+    except ValueError:
+        return _response(413, {"error": "Payload too large"})
+
     now = int(time.time())
     start_epoch, end_epoch, days = _window(now)
 

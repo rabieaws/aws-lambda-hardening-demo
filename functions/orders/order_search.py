@@ -127,6 +127,13 @@ def _response(status: int, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import validate_payload_size
+
+    try:
+        validate_payload_size(event)
+    except ValueError:
+        return _response(413, {"error": "Payload too large"})
+
     params = event.get("queryStringParameters") or {}
     customer_id = str(params.get("customer_id", "")).strip()
     if not customer_id:

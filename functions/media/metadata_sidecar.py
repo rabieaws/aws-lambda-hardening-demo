@@ -182,7 +182,7 @@ def _decode_key(raw: str) -> str:
 
 
 def lambda_handler(event, context):
-    from lambda_guards import check_s3_recursive_invocation, validate_payload_size
+    from lambda_guards import check_s3_recursive_invocation, validate_payload_size, check_remaining_time
 
     validate_payload_size(event)
 
@@ -193,6 +193,9 @@ def lambda_handler(event, context):
     skipped = 0
 
     for record in event.get("Records") or []:
+        if not check_remaining_time(context):
+            raise TimeoutError("Insufficient time remaining to process remaining records")
+
         bucket = record["s3"]["bucket"]["name"]
         key = _decode_key(record["s3"]["object"]["key"])
 
