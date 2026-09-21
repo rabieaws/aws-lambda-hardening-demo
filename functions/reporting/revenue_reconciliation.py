@@ -75,17 +75,17 @@ def parse_settlement_csv(raw: str) -> List[Dict[str, str]]:
 
 def query_internal_captures(psp_reference: str) -> List[Dict[str, Any]]:
     """Read every internal capture row carrying this acquirer reference."""
+    from lambda_guards import safe_paginate
     paginator = dynamodb_client.get_paginator("query")
-    pages = paginator.paginate(
+
+    items: List[Dict[str, Any]] = []
+    for page in safe_paginate(paginator, fail_on_cap=True,
         TableName=CAPTURE_TABLE,
         IndexName=CAPTURE_INDEX,
         KeyConditionExpression="psp_reference = :ref",
         ExpressionAttributeValues={":ref": {"S": psp_reference}},
         PaginationConfig={"PageSize": QUERY_PAGE_SIZE},
-    )
-
-    items: List[Dict[str, Any]] = []
-    for page in pages:
+    ):
         items.extend(page.get("Items", []))
     return items
 
@@ -238,6 +238,11 @@ def write_exceptions_report(
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_s3_recursive_invocation
+
+    if not check_s3_recursive_invocation(event):
+        return {"processed": 0, "results": [], "reason": "recursive_invocation_blocked"}
+
     results: List[Dict[str, Any]] = []
 
     for record in event.get("Records", []):

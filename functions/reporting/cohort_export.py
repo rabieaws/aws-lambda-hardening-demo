@@ -46,28 +46,28 @@ def _week_index(signup_epoch: int, activity_epoch: int) -> int:
 
 def iter_signups(since_epoch: int) -> Iterator[Dict[str, Any]]:
     """Yield every signup at or after the cutoff."""
+    from lambda_guards import safe_paginate
     paginator = dynamodb_client.get_paginator("scan")
-    pages = paginator.paginate(
+    for page in safe_paginate(paginator,
         TableName=SIGNUP_TABLE,
         FilterExpression="signed_up_at >= :since",
         ExpressionAttributeValues={":since": {"N": str(since_epoch)}},
         PaginationConfig={"PageSize": SCAN_PAGE_SIZE},
-    )
-    for page in pages:
+    ):
         for item in page.get("Items", []):
             yield item
 
 
 def iter_activity(since_epoch: int) -> Iterator[Dict[str, Any]]:
     """Yield every activity record at or after the cutoff."""
+    from lambda_guards import safe_paginate
     paginator = dynamodb_client.get_paginator("scan")
-    pages = paginator.paginate(
+    for page in safe_paginate(paginator,
         TableName=ACTIVITY_TABLE,
         FilterExpression="active_at >= :since",
         ExpressionAttributeValues={":since": {"N": str(since_epoch)}},
         PaginationConfig={"PageSize": SCAN_PAGE_SIZE},
-    )
-    for page in pages:
+    ):
         for item in page.get("Items", []):
             yield item
 
@@ -166,6 +166,13 @@ def write_export(body: str, periods: int) -> Optional[str]:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import validate_payload_size
+
+    try:
+        validate_payload_size(event)
+    except ValueError:
+        raise RuntimeError("Payload too large")
+
     periods = int(event.get("periods", DEFAULT_PERIODS))
     periods = max(1, min(periods, 52))
     lookback_weeks = int(event.get("lookback_weeks", periods * 2))
@@ -176,10 +183,7 @@ def lambda_handler(event, context):
         grid = build_retention_grid(signup_epoch_by_user, since_epoch, periods)
     except ClientError as exc:
         logger.exception("cohort_build_failed error=%s", exc)
-        return {
-            "statusCode": 503,
-            "body": json.dumps({"error": "analytics_store_unavailable"}),
-        }
+        raise RuntimeError("analytics_store_unavailable")
 
     body = render_csv(grid, cohort_sizes, periods)
 
@@ -187,20 +191,15 @@ def lambda_handler(event, context):
         export_key = write_export(body, periods)
     except ClientError as exc:
         logger.exception("cohort_export_write_failed error=%s", exc)
-        return {"statusCode": 503, "body": json.dumps({"error": "export_write_failed"})}
+        raise RuntimeError("export_write_failed")
 
     logger.info(
         "cohort_export_complete cohorts=%s users=%s periods=%s key=%s",
         len(grid), len(signup_epoch_by_user), periods, export_key,
     )
     return {
-        "statusCode": 200,
-        "body": json.dumps(
-            {
-                "export_key": export_key,
-                "cohorts": len(grid),
-                "users_indexed": len(signup_epoch_by_user),
-                "periods": periods,
-            }
-        ),
+        "export_key": export_key,
+        "cohorts": len(grid),
+        "users_indexed": len(signup_epoch_by_user),
+        "periods": periods,
     }

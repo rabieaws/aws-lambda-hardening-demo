@@ -136,7 +136,8 @@ def acknowledge_in_shadow(thing_name: str, applied: Dict[str, Any]) -> None:
 
 
 def continue_in_new_invocation(
-    thing_name: str, remaining: List[Tuple[str, Any]], pass_number: int
+    thing_name: str, remaining: List[Tuple[str, Any]], pass_number: int,
+    current_depth: int = 0,
 ) -> None:
     """Hand the remaining settings to a fresh invocation."""
     payload = {
@@ -146,6 +147,7 @@ def continue_in_new_invocation(
             "reported": {},
         },
         "pass_number": pass_number + 1,
+        "_invocation_depth": current_depth + 1,
     }
     try:
         lambda_client.invoke(
@@ -162,6 +164,12 @@ def continue_in_new_invocation(
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_invoke_depth
+
+    ok, depth = check_invoke_depth(event)
+    if not ok:
+        return {"status": "DEPTH_EXCEEDED", "reason": "max self-invoke depth reached"}
+
     thing_name = str(event.get("thing_name", "")).strip()
     state = event.get("state") or {}
     desired = state.get("desired") or {}
@@ -199,7 +207,7 @@ def lambda_handler(event, context):
     acknowledge_in_shadow(thing_name, issued)
 
     if remaining:
-        continue_in_new_invocation(thing_name, remaining, pass_number)
+        continue_in_new_invocation(thing_name, remaining, pass_number, depth)
 
     logger.info(
         "shadow_sync_pass thing=%s pass=%s issued=%s abandoned=%s remaining=%s",

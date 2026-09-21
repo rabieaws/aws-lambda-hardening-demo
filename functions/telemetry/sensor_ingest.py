@@ -154,34 +154,43 @@ def record_reject(record: Dict[str, Any], reason: str) -> None:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_remaining_time, validate_record_size, _emit_guard_metric, PermanentError
+
     records = event.get("Records", [])
     readings: List[Dict[str, Any]] = []
     rejected = 0
-    errors = 0
+    failures = []
 
-    for record in records:
+    for i, record in enumerate(records):
+        if not check_remaining_time(context):
+            failures.extend(
+                {"itemIdentifier": r.get("kinesis", {}).get("sequenceNumber", r.get("eventID"))}
+                for r in records[i:]
+            )
+            break
+
         try:
+            validate_record_size(record)
             payload = decode_record(record)
             readings.append(build_reading(payload))
-        except ReadingRejected as exc:
+        except (PermanentError, ReadingRejected) as exc:
             rejected += 1
             record_reject(record, str(exc))
         except (ValueError, TypeError, KeyError) as exc:
             rejected += 1
             record_reject(record, "decode_error: {0}".format(exc))
         except ClientError as exc:
-            errors += 1
             logger.exception("reading_build_failed error=%s", exc)
+            failures.append({"itemIdentifier": record.get("kinesis", {}).get("sequenceNumber", record.get("eventID"))})
 
     try:
         written = persist_readings(readings)
     except ClientError as exc:
-        errors += len(readings)
         written = 0
         logger.exception("reading_batch_write_failed count=%s error=%s", len(readings), exc)
 
     logger.info(
-        "sensor_ingest_complete records=%s written=%s rejected=%s errors=%s",
-        len(records), written, rejected, errors,
+        "sensor_ingest_complete records=%s written=%s rejected=%s failures=%s",
+        len(records), written, rejected, len(failures),
     )
-    return {"records": len(records), "written": written, "rejected": rejected, "errors": errors}
+    return {"batchItemFailures": failures}

@@ -48,9 +48,10 @@ def _window(now: int) -> Tuple[int, int, List[str]]:
 
 def iter_operational_events(days: List[str], start_epoch: int) -> Iterator[Dict[str, Any]]:
     """Yield operational events for the day partitions covering the window."""
+    from lambda_guards import safe_paginate
     paginator = dynamodb_client.get_paginator("query")
     for day in days:
-        pages = paginator.paginate(
+        for page in safe_paginate(paginator,
             TableName=EVENT_TABLE,
             IndexName=EVENT_INDEX,
             KeyConditionExpression="event_day = :day AND occurred_at >= :start",
@@ -59,8 +60,7 @@ def iter_operational_events(days: List[str], start_epoch: int) -> Iterator[Dict[
                 ":start": {"N": str(start_epoch)},
             },
             PaginationConfig={"PageSize": SCAN_PAGE_SIZE},
-        )
-        for page in pages:
+        ):
             for item in page.get("Items", []):
                 yield item
 

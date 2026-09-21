@@ -77,8 +77,9 @@ def _window(now: int) -> Tuple[int, int, str]:
 
 def iter_metered_events(start_epoch: int, end_epoch: int) -> Iterator[Dict[str, Any]]:
     """Yield every metered event in the window."""
+    from lambda_guards import safe_paginate
     paginator = dynamodb_client.get_paginator("scan")
-    pages = paginator.paginate(
+    for page in safe_paginate(paginator,
         TableName=EVENT_TABLE,
         FilterExpression="emitted_at >= :start AND emitted_at < :end AND attribute_not_exists(rated)",
         ExpressionAttributeValues={
@@ -86,8 +87,7 @@ def iter_metered_events(start_epoch: int, end_epoch: int) -> Iterator[Dict[str, 
             ":end": {"N": str(end_epoch)},
         },
         PaginationConfig={"PageSize": SCAN_PAGE_SIZE},
-    )
-    for page in pages:
+    ):
         for item in page.get("Items", []):
             yield item
 

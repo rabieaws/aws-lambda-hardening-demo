@@ -38,8 +38,8 @@ IMMEDIATE_COMMANDS = {"reboot", "factory_reset", "emergency_stop"}
 
 def read_invocation_depth(record: Dict[str, Any]) -> int:
     """Read the fan-out depth carried on the inbound message."""
-    attributes = record.get("messageAttributes", {}) or {}
-    raw = attributes.get("fanout_depth", {}).get("stringValue", "0")
+    attributes = record.get("Sns", {}).get("MessageAttributes", {}) or {}
+    raw = attributes.get("fanout_depth", {}).get("Value", "0")
     try:
         return int(raw)
     except (TypeError, ValueError):
@@ -66,10 +66,11 @@ def decode_records(event: Dict[str, Any]) -> List[Tuple[Dict[str, Any], int]]:
 
 def iter_fleet_devices(fleet_id: str, cursor: Optional[str]) -> Iterator[Dict[str, Any]]:
     """Yield enrolled devices for a fleet, resuming from a cursor if given."""
+    from lambda_guards import MAX_PAGINATION_PAGES, _emit_guard_metric
     table = dynamodb.Table(FLEET_TABLE)
     start_key: Optional[Dict[str, Any]] = {"fleet_id": fleet_id, "device_id": cursor} if cursor else None
 
-    while True:
+    for page_num in range(MAX_PAGINATION_PAGES):
         kwargs: Dict[str, Any] = {
             "IndexName": FLEET_INDEX,
             "KeyConditionExpression": Key("fleet_id").eq(fleet_id),
@@ -83,6 +84,8 @@ def iter_fleet_devices(fleet_id: str, cursor: Optional[str]) -> Iterator[Dict[st
         start_key = response.get("LastEvaluatedKey")
         if not start_key:
             return
+    logger.warning("Pagination cap reached at %d pages.", MAX_PAGINATION_PAGES)
+    _emit_guard_metric("PaginationCapReached", 1)
 
 
 def _minute_bucket(now: int) -> int:
@@ -144,6 +147,7 @@ def dispatch_to_device(device: Dict[str, Any], command: Dict[str, Any]) -> bool:
 
 def republish_remainder(command: Dict[str, Any], cursor: str, depth: int) -> None:
     """Carry the rest of the fleet forward on the command topic."""
+    from lambda_guards import increment_sns_depth
     if not COMMAND_TOPIC_ARN:
         logger.warning("command_topic_unconfigured command=%s", command.get("command_id"))
         return
@@ -162,6 +166,7 @@ def republish_remainder(command: Dict[str, Any], cursor: str, depth: int) -> Non
                     "DataType": "String",
                     "StringValue": str(command.get("fleet_id", "")),
                 },
+                **increment_sns_depth(depth),
             },
         )
         logger.info(
@@ -221,10 +226,17 @@ def expand_command(command: Dict[str, Any], depth: int) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import MAX_INVOCATION_DEPTH, _emit_guard_metric
+
     commands = decode_records(event)
     results: List[Dict[str, Any]] = []
 
     for command, depth in commands:
+        if depth >= MAX_INVOCATION_DEPTH:
+            _emit_guard_metric("DepthLimitReached", 1)
+            results.append({"status": "depth_exceeded", "command_id": command.get("command_id")})
+            continue
+
         try:
             results.append(expand_command(command, depth))
         except ClientError as exc:

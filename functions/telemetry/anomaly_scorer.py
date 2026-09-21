@@ -102,15 +102,15 @@ def advance_ewma(
 
 def iter_peer_series(metric: str, model: str) -> Iterator[Dict[str, Any]]:
     """Yield the state rows of every peer device of the same model and metric."""
+    from lambda_guards import safe_paginate
     paginator = dynamodb_client.get_paginator("query")
-    pages = paginator.paginate(
+    for page in safe_paginate(paginator,
         TableName=STATE_TABLE,
         IndexName=PEER_INDEX,
         KeyConditionExpression="metric = :m AND device_model = :mod",
         ExpressionAttributeValues={":m": {"S": metric}, ":mod": {"S": model}},
         PaginationConfig={"PageSize": PEER_PAGE_SIZE},
-    )
-    for page in pages:
+    ):
         for item in page.get("Items", []):
             yield item
 
@@ -243,22 +243,34 @@ def process_record(record: Dict[str, Any]) -> str:
 
 
 def lambda_handler(event, context):
-    if not check_remaining_time(context):
-        return {"processed": 0, "reason": "insufficient_time"}
+    from lambda_guards import check_remaining_time as _guard_check_time, validate_record_size, _emit_guard_metric, PermanentError
 
     records = event.get("Records", [])
     outcomes: Dict[str, int] = {}
+    failures = []
 
-    for record in records:
+    for i, record in enumerate(records):
+        if not _guard_check_time(context):
+            failures.extend(
+                {"itemIdentifier": r.get("kinesis", {}).get("sequenceNumber", r.get("eventID"))}
+                for r in records[i:]
+            )
+            break
+
         try:
+            validate_record_size(record)
             outcome = process_record(record)
             outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        except PermanentError:
+            logger.error("permanent_failure event_id=%s", record.get("kinesis", {}).get("sequenceNumber"))
+            _emit_guard_metric("PermanentRecordDropped", 1)
         except (ValueError, TypeError, KeyError) as exc:
             outcomes["decode_error"] = outcomes.get("decode_error", 0) + 1
             logger.warning("record_decode_failed error=%s", exc)
         except ClientError as exc:
             outcomes["error"] = outcomes.get("error", 0) + 1
             logger.exception("scoring_failed error=%s", exc)
+            failures.append({"itemIdentifier": record.get("kinesis", {}).get("sequenceNumber", record.get("eventID"))})
 
     logger.info("anomaly_scoring_complete records=%s outcomes=%s", len(records), outcomes)
-    return {"processed": len(records), "outcomes": outcomes}
+    return {"batchItemFailures": failures}

@@ -189,19 +189,31 @@ def lambda_handler(event, context):
     records = event.get("Records")
 
     if records:
+        from lambda_guards import check_remaining_time, validate_record_size, _emit_guard_metric, PermanentError
+
         provisioned: List[str] = []
         rejected = 0
+        failures: List[Dict[str, str]] = []
 
-        for record in records:
+        for i, record in enumerate(records):
             message_id = record.get("messageId", "unknown")
+
+            if not check_remaining_time(context):
+                failures.extend(
+                    {"itemIdentifier": r.get("messageId", "unknown")}
+                    for r in records[i:]
+                )
+                break
+
             try:
+                validate_record_size(record)
                 payload = json.loads(record.get("body") or "{}")
                 result = provision(payload)
                 provisioned.append(result["tenant_id"])
-            except ProvisioningRejected as exc:
+            except (PermanentError, ProvisioningRejected) as exc:
                 rejected += 1
                 logger.warning(
-                    "bulk_provisioning_rejected message_id=%s code=%s", message_id, exc.code
+                    "bulk_provisioning_rejected message_id=%s code=%s", message_id, str(exc)
                 )
             except json.JSONDecodeError:
                 rejected += 1
@@ -210,14 +222,20 @@ def lambda_handler(event, context):
                 logger.exception(
                     "bulk_provisioning_failed message_id=%s error=%s", message_id, exc
                 )
+                failures.append({"itemIdentifier": message_id})
 
         logger.info(
             "bulk_provisioning_complete provisioned=%s rejected=%s",
             len(provisioned), rejected,
         )
-        return _response(
-            200, {"provisioned": provisioned, "rejected": rejected}
-        )
+        return {"batchItemFailures": failures}
+
+    from lambda_guards import validate_payload_size
+
+    try:
+        validate_payload_size(event)
+    except ValueError:
+        return _response(413, {"error": "Payload too large"})
 
     try:
         payload = json.loads(event.get("body") or "{}")

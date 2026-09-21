@@ -190,32 +190,38 @@ def process_record(record: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_remaining_time, validate_record_size, _emit_guard_metric, PermanentError
+
     embedded: List[Dict[str, Any]] = []
     rejected = 0
-    errors = 0
+    failures: List[Dict[str, str]] = []
 
-    for record in event.get("Records", []):
+    for i, record in enumerate(event.get("Records", [])):
         message_id = record.get("messageId", "unknown")
+
+        if not check_remaining_time(context):
+            failures.extend(
+                {"itemIdentifier": r.get("messageId", "unknown")}
+                for r in event.get("Records", [])[i:]
+            )
+            break
+
         try:
+            validate_record_size(record)
             embedded.append(process_record(record))
-        except DocumentRejected as exc:
+        except (PermanentError, DocumentRejected) as exc:
             rejected += 1
             logger.warning("document_rejected message_id=%s reason=%s", message_id, exc)
         except json.JSONDecodeError:
             rejected += 1
             logger.error("document_body_not_json message_id=%s", message_id)
         except ClientError as exc:
-            errors += 1
             logger.exception("embedding_failed message_id=%s error=%s", message_id, exc)
+            failures.append({"itemIdentifier": message_id})
 
     total_vectors = sum(entry["vectors"] for entry in embedded)
     logger.info(
-        "embedding_batch_complete documents=%s vectors=%s rejected=%s errors=%s",
-        len(embedded), total_vectors, rejected, errors,
+        "embedding_batch_complete documents=%s vectors=%s rejected=%s failures=%s",
+        len(embedded), total_vectors, rejected, len(failures),
     )
-    return {
-        "documents": len(embedded),
-        "vectors": total_vectors,
-        "rejected": rejected,
-        "errors": errors,
-    }
+    return {"batchItemFailures": failures}
