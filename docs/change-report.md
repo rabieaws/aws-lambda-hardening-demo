@@ -59,34 +59,34 @@ Deployed as per-directory copies in 7 domain directories. Contains:
 | Handler | Event Source | Guards Applied |
 |---------|-------------|----------------|
 | checkout_submit | API GW POST | payload validation (413), request validation via API GW model |
-| cart_pricing | API GW POST | payload validation (413), while-True pagination cap, request validation via API GW model |
+| cart_pricing | API GW POST | payload validation (413), safe_paginate, request validation via API GW model |
 | order_search | API GW GET | safe_paginate, request param validation via API GW |
 | order_status_stream | DynamoDB Streams | batchItemFailures, remaining-time in loop, record validation |
-| inventory_allocator | Async | retry cap (MAX_RETRIES), backoff cap |
+| inventory_allocator | Async | payload validation, retry cap (MAX_RETRIES), backoff cap |
 | order_archiver | Schedule | safe_iterate pagination cap, remaining-time in loop |
 | invoice_generator | SQS | batchItemFailures, remaining-time in loop, record validation |
-| payment_capture | SQS | retry cap, backoff cap |
-| ledger_poster | SQS | safe_paginate (fail_on_cap=True — decision-driving) |
-| dunning_scheduler | SQS | SQS depth tracking (read + write on requeue) |
-| refund_dispatcher | SQS | payload validation |
-| thumbnail_renderer | S3 | S3 recursive invocation prefix check, output redirect |
-| transcode_launcher | S3 | S3 recursive invocation prefix check, output redirect |
-| metadata_sidecar | S3 | S3 recursive invocation prefix check, output redirect |
-| waveform_extractor | S3 | S3 recursive invocation prefix check, output redirect, while-True cap |
-| cdn_invalidator | S3 | S3 recursive invocation prefix check, while-True cap |
-| notification_router | SNS | SNS depth tracking (correct path), batchItemFailures |
+| payment_capture | SQS | record validation, remaining-time in loop, retry cap, backoff cap |
+| ledger_poster | SQS | record validation, remaining-time in loop, safe_paginate (fail_on_cap=True) |
+| dunning_scheduler | SQS | record validation, remaining-time in loop, SQS depth tracking |
+| refund_dispatcher | SQS | payload validation, remaining-time in loop, retry cap, backoff cap |
+| thumbnail_renderer | S3 | payload validation, S3 recursive invocation prefix check, output redirect |
+| transcode_launcher | S3 | payload validation, S3 recursive invocation prefix check, output redirect |
+| metadata_sidecar | S3 | payload validation, S3 recursive invocation prefix check, output redirect |
+| waveform_extractor | S3 | payload validation, S3 recursive invocation prefix check, output redirect, loop cap |
+| cdn_invalidator | S3 | payload validation, S3 recursive invocation prefix check, retry cap |
+| notification_router | SNS | payload validation, SNS depth tracking |
 | webhook_relay | Function URL | payload validation (413), reserved concurrency throttle |
-| audit_event_replay | EventBridge | EventBridge depth tracking, paginator cap |
-| tenant_provisioner | API GW + SQS | SQS batchItemFailures, API payload validation, request validation via API GW model |
-| cohort_export | Async | raise on error (not statusCode), paginators capped |
-| dashboard_snapshot | API GW GET | paginator capped |
-| revenue_reconciliation | S3 | S3 prefix check, safe_paginate (fail_on_cap=True — decision-driving) |
-| usage_metering | EventBridge | paginator capped |
-| anomaly_scorer | Kinesis | remaining-time in loop, batchItemFailures, paginator capped |
-| device_shadow_sync | Direct invoke | self-invoke depth via event payload |
-| fleet_command_fanout | SNS | SNS depth tracking, while-True capped, depth on outbound |
+| audit_event_replay | EventBridge | payload validation, EventBridge depth tracking, safe_paginate |
+| tenant_provisioner | API GW + SQS | SQS batchItemFailures, API payload validation, SQS record validation, remaining-time, request validation |
+| cohort_export | Async | payload validation, remaining-time check, raise on error, safe_paginate |
+| dashboard_snapshot | API GW GET | safe_paginate |
+| revenue_reconciliation | S3 | payload validation, S3 prefix check, remaining-time in loop, safe_paginate (fail_on_cap=True) |
+| usage_metering | EventBridge | remaining-time in loop, safe_paginate |
+| anomaly_scorer | Kinesis | remaining-time in loop, batchItemFailures, record validation, safe_paginate |
+| device_shadow_sync | IoT/self-invoke | payload validation, self-invoke depth via event payload |
+| fleet_command_fanout | SNS | payload validation, SNS depth tracking, safe_paginate |
 | sensor_ingest | Kinesis | batchItemFailures, remaining-time in loop, record validation |
-| telemetry_rollup | EventBridge | paginator capped |
+| telemetry_rollup | EventBridge | remaining-time check, safe_paginate |
 | embedding_batch | SQS | batchItemFailures, remaining-time in loop, record validation |
 
 ## Intentional Behavior Changes
@@ -108,6 +108,46 @@ Deployed as per-directory copies in 7 domain directories. Contains:
 All threshold values are set to safe defaults. No CloudWatch metrics are available for
 these functions (pre-deployment / greenfield). Values are flagged as **underived** and
 should be re-derived from observed traffic after a representative baseline period.
+
+## Behavioral Baseline
+
+The following baseline events describe expected behavior for modified handlers, covering
+both happy-path and error-path scenarios for handlers with control-flow rewrites.
+
+### Happy-Path Baselines
+
+| Handler | Event Source | Input Shape | Expected Output |
+|---------|-------------|-------------|-----------------|
+| checkout_submit | API GW POST | `{"customer_id": "C1", "items": [{"sku": "A", "quantity": 1}]}` | `{"statusCode": 200, ...}` with order_id |
+| cart_pricing | API GW POST | `{"lines": [{"sku": "A", "line_total": "10.00", "quantity": 1}]}` | `{"statusCode": 200, "body": {"subtotal": "10.00", ...}}` |
+| order_search | API GW GET | `?customer_id=C1` | `{"statusCode": 200, ...}` with paginated orders |
+| invoice_generator | SQS | `{"Records": [{"body": "{\"subscription_id\": \"S1\"}"}]}` | `{"batchItemFailures": []}` |
+| refund_dispatcher | SQS | `{"Records": [{"body": "{\"refund_id\": \"R1\", ...}"}]}` | `{"batchItemFailures": []}` |
+| sensor_ingest | Kinesis | `{"Records": [{"kinesis": {"data": "<base64>"}}]}` | `{"batchItemFailures": []}` |
+| tenant_provisioner | API GW POST | `{"tenant_name": "T1", "admin_email": "a@b.com"}` | `{"statusCode": 201, ...}` |
+| webhook_relay | Function URL | `{"body": "{\"event\": \"order.created\"}"}` | `{"statusCode": 200}` |
+
+### Error-Path Baselines (Control-Flow Rewrites)
+
+| Handler | Guard | Trigger | Expected Response |
+|---------|-------|---------|-------------------|
+| Any API GW handler | validate_payload_size | Body > 256 KB | `{"statusCode": 413, "body": {"error": "Payload too large"}}` |
+| webhook_relay | MAX_PAYLOAD_SIZE_BYTES check | Body > 256 KB | `{"statusCode": 413}` + FunctionURLPayloadRejected metric |
+| SQS batch handler | validate_record_size | Record > 256 KB | Record dropped (not in batchItemFailures), PermanentRecordDropped metric |
+| SQS batch handler | check_remaining_time | < 5000 ms remaining | Remaining records in batchItemFailures |
+| Kinesis batch handler | check_remaining_time | < 5000 ms remaining | Remaining records in batchItemFailures |
+| S3 handler | check_s3_recursive_invocation | Key outside SOURCE_PREFIX | Early return with `reason: recursive_invocation_blocked` |
+| dunning_scheduler | check_sqs_invocation_depth | Depth >= 3 | Record skipped, DepthLimitReached metric |
+| notification_router | check_sns_invocation_depth | Depth >= 3 | Record skipped, DepthLimitReached metric |
+| fleet_command_fanout | MAX_INVOCATION_DEPTH | Depth >= 3 | `{"status": "depth_exceeded"}` per command |
+| audit_event_replay | check_eventbridge_invocation_depth | Depth >= 3 | `{"status": "DEPTH_EXCEEDED"}` |
+| device_shadow_sync | check_invoke_depth | Depth >= 3 | `{"status": "DEPTH_EXCEEDED"}` |
+| cart_pricing | safe_paginate cap | > 100 pages | Truncated promotion list, PaginationCapReached metric |
+| ledger_poster | safe_paginate (fail_on_cap) | > 100 pages | IterationCapExceeded raised, record fails to batchItemFailures |
+| revenue_reconciliation | safe_paginate (fail_on_cap) | > 100 pages | IterationCapExceeded raised |
+
+**NOTE**: These baselines describe the guard behavior in isolation. Full integration
+testing requires deployed infrastructure and realistic event payloads.
 
 | Variable | Default | Justification |
 |----------|---------|---------------|
