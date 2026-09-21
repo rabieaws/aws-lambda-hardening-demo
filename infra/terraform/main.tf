@@ -26,30 +26,53 @@ locals {
   lambda_root = "${path.module}/../../functions"
 
   common_environment = {
-    LOG_LEVEL = "INFO"
+    LOG_LEVEL = "WARNING"
     STAGE     = var.stage
+  }
+
+  telemetry_guard_vars = {
+    MAX_PAYLOAD_SIZE_BYTES = "262144"
+    MAX_LOOP_ITERATIONS    = "1000"
+    MAX_RETRIES            = "3"
+    MAX_BACKOFF_SECONDS    = "10.0"
+    MAX_PAGINATION_PAGES   = "100"
+    MIN_REMAINING_MS       = "5000"
+    MAX_INVOCATION_DEPTH   = "3"
+  }
+
+  reporting_guard_vars = {
+    MAX_PAYLOAD_SIZE_BYTES = "262144"
+    MAX_PAGINATION_PAGES   = "100"
+    MIN_REMAINING_MS       = "5000"
+    SOURCE_PREFIX          = "settlements/"
+    OUTPUT_PREFIX          = "reconciliation/"
   }
 
   telemetry_functions = {
     sensor_ingest = {
       handler = "sensor_ingest.lambda_handler"
       memory  = 512
+      timeout = 60
     }
     anomaly_scorer = {
       handler = "anomaly_scorer.lambda_handler"
       memory  = 1024
+      timeout = 60
     }
     device_shadow_sync = {
       handler = "device_shadow_sync.lambda_handler"
       memory  = 512
+      timeout = 60
     }
     fleet_command_fanout = {
       handler = "fleet_command_fanout.lambda_handler"
       memory  = 512
+      timeout = 60
     }
     telemetry_rollup = {
       handler = "telemetry_rollup.lambda_handler"
       memory  = 1769
+      timeout = 120
     }
   }
 
@@ -57,18 +80,22 @@ locals {
     revenue_reconciliation = {
       handler = "revenue_reconciliation.lambda_handler"
       memory  = 1024
+      timeout = 120
     }
     usage_metering = {
       handler = "usage_metering.lambda_handler"
       memory  = 1024
+      timeout = 120
     }
     dashboard_snapshot = {
       handler = "dashboard_snapshot.lambda_handler"
       memory  = 512
+      timeout = 25
     }
     cohort_export = {
       handler = "cohort_export.lambda_handler"
       memory  = 2048
+      timeout = 120
     }
   }
 }
@@ -112,6 +139,20 @@ resource "aws_iam_role_policy_attachment" "basic" {
 }
 
 # -----------------------------------------------------------------------------
+# DLQs
+# -----------------------------------------------------------------------------
+
+resource "aws_sqs_queue" "telemetry_dlq" {
+  name                      = "telemetry-dlq-${var.stage}"
+  message_retention_seconds = 1209600
+}
+
+resource "aws_sqs_queue" "reporting_dlq" {
+  name                      = "reporting-dlq-${var.stage}"
+  message_retention_seconds = 1209600
+}
+
+# -----------------------------------------------------------------------------
 # telemetry/  -- packaging root is ../../functions/telemetry
 # -----------------------------------------------------------------------------
 
@@ -125,9 +166,10 @@ resource "aws_lambda_function" "telemetry" {
   filename         = data.archive_file.telemetry.output_path
   source_code_hash = data.archive_file.telemetry.output_base64sha256
   memory_size      = each.value.memory
+  timeout          = each.value.timeout
 
   environment {
-    variables = merge(local.common_environment, {
+    variables = merge(local.common_environment, local.telemetry_guard_vars, {
       READING_TABLE = aws_dynamodb_table.sensor_readings.name
       STATE_TABLE   = aws_dynamodb_table.anomaly_state.name
     })
@@ -144,14 +186,32 @@ resource "aws_lambda_function" "reporting" {
   filename         = data.archive_file.reporting.output_path
   source_code_hash = data.archive_file.reporting.output_base64sha256
   memory_size      = each.value.memory
-  timeout          = 120
+  timeout          = each.value.timeout
 
   environment {
-    variables = merge(local.common_environment, {
+    variables = merge(local.common_environment, local.reporting_guard_vars, {
       CAPTURE_TABLE = aws_dynamodb_table.captures_mirror.name
       REPORT_BUCKET = aws_s3_bucket.reports.id
     })
   }
+}
+
+# -----------------------------------------------------------------------------
+# Log groups
+# -----------------------------------------------------------------------------
+
+resource "aws_cloudwatch_log_group" "telemetry" {
+  for_each = local.telemetry_functions
+
+  name              = "/aws/lambda/telemetry-${each.key}-${var.stage}"
+  retention_in_days = 30
+}
+
+resource "aws_cloudwatch_log_group" "reporting" {
+  for_each = local.reporting_functions
+
+  name              = "/aws/lambda/reporting-${each.key}-${var.stage}"
+  retention_in_days = 30
 }
 
 # -----------------------------------------------------------------------------
@@ -164,17 +224,37 @@ resource "aws_kinesis_stream" "telemetry" {
 }
 
 resource "aws_lambda_event_source_mapping" "sensor_ingest" {
-  event_source_arn  = aws_kinesis_stream.telemetry.arn
-  function_name     = aws_lambda_function.telemetry["sensor_ingest"].arn
-  starting_position = "LATEST"
-  batch_size        = 500
+  event_source_arn               = aws_kinesis_stream.telemetry.arn
+  function_name                  = aws_lambda_function.telemetry["sensor_ingest"].arn
+  starting_position              = "LATEST"
+  batch_size                     = 500
+  maximum_retry_attempts         = 3
+  maximum_record_age_in_seconds  = 600
+  bisect_batch_on_function_error = true
+  function_response_types        = ["ReportBatchItemFailures"]
+
+  destination_config {
+    on_failure {
+      destination_arn = aws_sqs_queue.telemetry_dlq.arn
+    }
+  }
 }
 
 resource "aws_lambda_event_source_mapping" "anomaly_scorer" {
-  event_source_arn  = aws_kinesis_stream.telemetry.arn
-  function_name     = aws_lambda_function.telemetry["anomaly_scorer"].arn
-  starting_position = "LATEST"
-  batch_size        = 200
+  event_source_arn               = aws_kinesis_stream.telemetry.arn
+  function_name                  = aws_lambda_function.telemetry["anomaly_scorer"].arn
+  starting_position              = "LATEST"
+  batch_size                     = 200
+  maximum_retry_attempts         = 3
+  maximum_record_age_in_seconds  = 600
+  bisect_batch_on_function_error = true
+  function_response_types        = ["ReportBatchItemFailures"]
+
+  destination_config {
+    on_failure {
+      destination_arn = aws_sqs_queue.telemetry_dlq.arn
+    }
+  }
 }
 
 resource "aws_sns_topic" "fleet_commands" {
@@ -217,6 +297,7 @@ resource "aws_s3_bucket_notification" "settlement" {
   lambda_function {
     lambda_function_arn = aws_lambda_function.reporting["revenue_reconciliation"].arn
     events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "settlements/"
   }
 }
 

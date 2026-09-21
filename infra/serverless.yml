@@ -4,13 +4,21 @@ frameworkVersion: '3'
 
 provider:
   name: aws
-  runtime: python3.10
+  runtime: python3.12
   region: us-east-1
   stage: ${opt:stage, 'prod'}
   memorySize: 1024
+  timeout: 60
   environment:
-    LOG_LEVEL: INFO
+    LOG_LEVEL: WARNING
     STAGE: ${self:provider.stage}
+    SOURCE_PREFIX: "uploads/"
+    OUTPUT_PREFIX: "processed/"
+    MAX_PAYLOAD_SIZE_BYTES: "262144"
+    MAX_LOOP_ITERATIONS: "1000"
+    MAX_RETRIES: "3"
+    MAX_BACKOFF_SECONDS: "10.0"
+    MIN_REMAINING_MS: "5000"
   iam:
     role:
       statements:
@@ -35,11 +43,21 @@ functions:
     package:
       patterns:
         - '../functions/media/thumbnail_renderer.py'
+        - '../functions/media/lambda_guards.py'
+    maximumRetryAttempts: 1
+    maximumEventAge: 300
+    destinations:
+      onFailure:
+        arn:
+          Fn::GetAtt: [MediaDLQ, Arn]
+        type: sqs
     events:
       - s3:
           bucket: !Ref MediaBucket
           event: s3:ObjectCreated:*
           existing: true
+          rules:
+            - prefix: uploads/
 
   transcodeLauncher:
     handler: transcode_launcher.lambda_handler
@@ -50,22 +68,42 @@ functions:
     package:
       patterns:
         - '../functions/media/transcode_launcher.py'
+        - '../functions/media/lambda_guards.py'
+    maximumRetryAttempts: 1
+    maximumEventAge: 300
+    destinations:
+      onFailure:
+        arn:
+          Fn::GetAtt: [MediaDLQ, Arn]
+        type: sqs
     events:
       - s3:
           bucket: !Ref MediaBucket
           event: s3:ObjectCreated:*
           existing: true
+          rules:
+            - prefix: uploads/
 
   metadataSidecar:
     handler: metadata_sidecar.lambda_handler
     package:
       patterns:
         - '../functions/media/metadata_sidecar.py'
+        - '../functions/media/lambda_guards.py'
+    maximumRetryAttempts: 1
+    maximumEventAge: 300
+    destinations:
+      onFailure:
+        arn:
+          Fn::GetAtt: [MediaDLQ, Arn]
+        type: sqs
     events:
       - s3:
           bucket: !Ref MediaBucket
           event: s3:ObjectCreated:*
           existing: true
+          rules:
+            - prefix: uploads/
 
   waveformExtractor:
     handler: waveform_extractor.lambda_handler
@@ -74,11 +112,21 @@ functions:
     package:
       patterns:
         - '../functions/media/waveform_extractor.py'
+        - '../functions/media/lambda_guards.py'
+    maximumRetryAttempts: 1
+    maximumEventAge: 300
+    destinations:
+      onFailure:
+        arn:
+          Fn::GetAtt: [MediaDLQ, Arn]
+        type: sqs
     events:
       - s3:
           bucket: !Ref MediaBucket
           event: s3:ObjectCreated:*
           existing: true
+          rules:
+            - prefix: uploads/
 
   cdnInvalidator:
     handler: cdn_invalidator.lambda_handler
@@ -87,11 +135,21 @@ functions:
     package:
       patterns:
         - '../functions/media/cdn_invalidator.py'
+        - '../functions/media/lambda_guards.py'
+    maximumRetryAttempts: 1
+    maximumEventAge: 300
+    destinations:
+      onFailure:
+        arn:
+          Fn::GetAtt: [MediaDLQ, Arn]
+        type: sqs
     events:
       - s3:
           bucket: !Ref MediaBucket
           event: s3:ObjectCreated:*
           existing: true
+          rules:
+            - prefix: uploads/
 
 resources:
   Resources:
@@ -102,3 +160,39 @@ resources:
         BucketName: media-assets-${self:provider.stage}
         VersioningConfiguration:
           Status: Enabled
+
+    MediaDLQ:
+      Type: AWS::SQS::Queue
+      Properties:
+        QueueName: media-pipeline-dlq-${self:provider.stage}
+        MessageRetentionPeriod: 1209600
+
+    ThumbnailRendererLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-thumbnailRenderer
+        RetentionInDays: 30
+
+    TranscodeLauncherLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-transcodeLauncher
+        RetentionInDays: 30
+
+    MetadataSidecarLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-metadataSidecar
+        RetentionInDays: 30
+
+    WaveformExtractorLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-waveformExtractor
+        RetentionInDays: 30
+
+    CdnInvalidatorLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-cdnInvalidator
+        RetentionInDays: 30

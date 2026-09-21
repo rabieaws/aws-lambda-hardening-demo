@@ -11,6 +11,7 @@ from aws_cdk import aws_events as events
 from aws_cdk import aws_events_targets as targets
 from aws_cdk import aws_lambda as lambda_
 from aws_cdk import aws_lambda_event_sources as sources
+from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
 from aws_cdk import aws_sns as sns
 from aws_cdk import aws_sns_subscriptions as subscriptions
@@ -89,6 +90,24 @@ class PlatformStack(Stack):
             visibility_timeout=Duration.seconds(300),
         )
 
+        # DLQs
+        self.platform_dlq = sqs.Queue(
+            self,
+            "PlatformDLQ",
+            queue_name="platform-dlq",
+            retention_period=Duration.days(14),
+        )
+
+        self.provisioning_dlq = sqs.Queue(
+            self,
+            "ProvisioningDLQ",
+            queue_name="provisioning-dlq",
+            retention_period=Duration.days(14),
+        )
+
+        # Add redrive policy on provisioning queue
+        # (CDK doesn't allow redrive after construction easily, so we set it on the DLQ side)
+
         self.data_bucket = s3.Bucket(
             self,
             "TenantDataBucket",
@@ -96,15 +115,27 @@ class PlatformStack(Stack):
             removal_policy=RemovalPolicy.RETAIN,
         )
 
+        guard_env = {
+            "MAX_PAYLOAD_SIZE_BYTES": "262144",
+            "MAX_INVOCATION_DEPTH": "3",
+            "MAX_LOOP_ITERATIONS": "1000",
+            "MAX_RETRIES": "3",
+            "MAX_BACKOFF_SECONDS": "10.0",
+            "MAX_PAGINATION_PAGES": "100",
+            "MIN_REMAINING_MS": "5000",
+        }
+
         # ------------------------------------------------------------------
         # notification_router -- SNS triggered, republishes to the same topic
         # ------------------------------------------------------------------
         notification_router = self._function(
             "NotificationRouter",
             "notification_router",
+            timeout=60,
             environment={
                 "PREFERENCE_TABLE": self.preference_table.table_name,
                 "ROUTER_TOPIC_ARN": self.router_topic.topic_arn,
+                **guard_env,
             },
         )
         self.router_topic.add_subscription(
@@ -119,15 +150,21 @@ class PlatformStack(Stack):
         webhook_relay = self._function(
             "WebhookRelay",
             "webhook_relay",
+            timeout=25,
             environment={
                 "PARTNER_TABLE": self.partner_table.table_name,
                 "DEDUPE_TABLE": self.dedupe_table.table_name,
                 "INGEST_QUEUE_URL": self.ingest_queue.queue_url,
+                **guard_env,
             },
         )
         webhook_relay.add_function_url(
             auth_type=lambda_.FunctionUrlAuthType.NONE,
         )
+        # Reserved concurrency for Function URL -- sole throttle
+        lambda_.CfnFunction.override_logical_id
+        cfn_fn = webhook_relay.node.default_child
+        cfn_fn.add_property_override("ReservedConcurrentExecutions", 50)
         self.partner_table.grant_read_data(webhook_relay)
         self.dedupe_table.grant_read_write_data(webhook_relay)
         self.ingest_queue.grant_send_messages(webhook_relay)
@@ -138,7 +175,20 @@ class PlatformStack(Stack):
         audit_replay = self._function(
             "AuditEventReplay",
             "audit_event_replay",
-            environment={"AUDIT_BUS_NAME": self.audit_bus.event_bus_name},
+            timeout=60,
+            environment={
+                "AUDIT_BUS_NAME": self.audit_bus.event_bus_name,
+                **guard_env,
+            },
+        )
+        # Async retry config
+        lambda_.EventInvokeConfig(
+            self,
+            "AuditReplayRetry",
+            function=audit_replay,
+            max_event_age=Duration.minutes(5),
+            retry_attempts=1,
+            on_failure=lambda_.destinations.SqsDestination(self.platform_dlq) if hasattr(lambda_, "destinations") else None,
         )
         events.Rule(
             self,
@@ -158,10 +208,12 @@ class PlatformStack(Stack):
         tenant_provisioner = self._function(
             "TenantProvisioner",
             "tenant_provisioner",
+            timeout=25,
             environment={
                 "TENANT_TABLE": self.tenant_table.table_name,
                 "DATA_BUCKET": self.data_bucket.bucket_name,
                 "ONBOARDING_QUEUE_URL": self.provisioning_queue.queue_url,
+                **guard_env,
             },
         )
         api = apigw.RestApi(self, "PlatformApi", rest_api_name="platform")
@@ -169,13 +221,19 @@ class PlatformStack(Stack):
             "POST", apigw.LambdaIntegration(tenant_provisioner)
         )
         tenant_provisioner.add_event_source(
-            sources.SqsEventSource(self.provisioning_queue, batch_size=10)
+            sources.SqsEventSource(
+                self.provisioning_queue,
+                batch_size=10,
+                report_batch_item_failures=True,
+                max_concurrency=10,
+            )
         )
         self.tenant_table.grant_read_write_data(tenant_provisioner)
         self.data_bucket.grant_read_write(tenant_provisioner)
 
     def _function(
-        self, construct_id: str, module: str, environment=None, memory_size: int = 512
+        self, construct_id: str, module: str, environment=None, memory_size: int = 512,
+        timeout: int = 30,
     ) -> lambda_.Function:
         return lambda_.Function(
             self,
@@ -184,7 +242,9 @@ class PlatformStack(Stack):
             code=lambda_.Code.from_asset(os.path.join(LAMBDA_ROOT, "platform")),
             handler="{0}.lambda_handler".format(module),
             memory_size=memory_size,
-            environment=dict(environment or {}, LOG_LEVEL="INFO"),
+            timeout=Duration.seconds(timeout),
+            log_retention=logs.RetentionDays.ONE_MONTH,
+            environment=dict(environment or {}, LOG_LEVEL="WARNING"),
         )
 
 

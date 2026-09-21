@@ -6,11 +6,12 @@ Globals:
   Function:
     Runtime: python3.12
     MemorySize: 512
+    Timeout: 30
     Architectures:
       - x86_64
     Environment:
       Variables:
-        LOG_LEVEL: INFO
+        LOG_LEVEL: WARNING
         STAGE: !Ref Stage
 
 Parameters:
@@ -29,12 +30,15 @@ Resources:
     Properties:
       CodeUri: ../functions/orders
       Handler: checkout_submit.lambda_handler
-      Runtime: python3.9
+      Runtime: python3.12
+      Timeout: 25
       Environment:
         Variables:
           ORDER_TABLE: !Ref OrderTable
           CATALOG_TABLE: !Ref CatalogTable
           FULFILMENT_QUEUE_URL: !Ref FulfilmentQueue
+          MAX_PAYLOAD_SIZE_BYTES: "262144"
+          LOG_LEVEL: WARNING
       Events:
         Post:
           Type: Api
@@ -47,10 +51,14 @@ Resources:
     Properties:
       CodeUri: ../functions/orders
       Handler: cart_pricing.lambda_handler
-      Runtime: python3.9
+      Runtime: python3.12
+      Timeout: 25
       Environment:
         Variables:
           PROMOTION_TABLE: !Ref PromotionTable
+          MAX_PAYLOAD_SIZE_BYTES: "262144"
+          MAX_PAGINATION_PAGES: "100"
+          LOG_LEVEL: WARNING
       Events:
         Post:
           Type: Api
@@ -63,9 +71,13 @@ Resources:
     Properties:
       CodeUri: ../functions/orders
       Handler: order_search.lambda_handler
+      Timeout: 25
       Environment:
         Variables:
           ORDER_TABLE: !Ref OrderTable
+          MAX_PAGINATION_PAGES: "100"
+          MAX_PAYLOAD_SIZE_BYTES: "262144"
+          LOG_LEVEL: WARNING
       Events:
         Get:
           Type: Api
@@ -78,9 +90,13 @@ Resources:
     Properties:
       CodeUri: ../functions/orders
       Handler: order_status_stream.lambda_handler
+      Timeout: 60
       Environment:
         Variables:
           NOTIFICATION_TOPIC_ARN: !Ref OrderNotificationTopic
+          MAX_PAYLOAD_SIZE_BYTES: "262144"
+          MIN_REMAINING_MS: "5000"
+          LOG_LEVEL: WARNING
       Events:
         OrderStream:
           Type: DynamoDB
@@ -88,16 +104,29 @@ Resources:
             Stream: !GetAtt OrderTable.StreamArn
             StartingPosition: LATEST
             BatchSize: 1000
+            MaximumRetryAttempts: 3
+            MaximumRecordAgeInSeconds: 600
+            BisectBatchOnFunctionError: true
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            DestinationConfig:
+              OnFailure:
+                Destination: !GetAtt OrderStatusStreamDLQ.Arn
 
   InventoryAllocatorFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../functions/orders
       Handler: inventory_allocator.lambda_handler
+      Timeout: 60
       Environment:
         Variables:
           INVENTORY_TABLE: !Ref InventoryTable
           RESERVATION_TABLE: !Ref ReservationTable
+          MAX_RETRIES: "3"
+          MAX_BACKOFF_SECONDS: "10.0"
+          MAX_PAYLOAD_SIZE_BYTES: "262144"
+          LOG_LEVEL: WARNING
 
   OrderArchiverFunction:
     Type: AWS::Serverless::Function
@@ -110,6 +139,9 @@ Resources:
         Variables:
           ORDER_TABLE: !Ref OrderTable
           ARCHIVE_BUCKET: !Ref ArchiveBucket
+          MAX_PAGINATION_PAGES: "100"
+          MIN_REMAINING_MS: "5000"
+          LOG_LEVEL: WARNING
       Events:
         Nightly:
           Type: Schedule
@@ -125,81 +157,232 @@ Resources:
     Properties:
       CodeUri: ../functions/billing
       Handler: invoice_generator.lambda_handler
+      Timeout: 60
       Environment:
         Variables:
           INVOICE_TABLE: !Ref InvoiceTable
           SUBSCRIPTION_TABLE: !Ref SubscriptionTable
+          MAX_PAYLOAD_SIZE_BYTES: "262144"
+          MIN_REMAINING_MS: "5000"
+          LOG_LEVEL: WARNING
       Events:
         InvoiceRequests:
           Type: SQS
           Properties:
             Queue: !GetAtt InvoiceQueue.Arn
             BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            ScalingConfig:
+              MaximumConcurrency: 10
 
   PaymentCaptureFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../functions/billing
       Handler: payment_capture.lambda_handler
+      Timeout: 60
       Environment:
         Variables:
           CAPTURE_TABLE: !Ref CaptureTable
           AUTHORIZATION_TABLE: !Ref AuthorizationTable
+          MAX_RETRIES: "3"
+          MAX_BACKOFF_SECONDS: "10.0"
+          MIN_REMAINING_MS: "5000"
+          LOG_LEVEL: WARNING
       Events:
         CaptureRequests:
           Type: SQS
           Properties:
             Queue: !GetAtt CaptureQueue.Arn
             BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            ScalingConfig:
+              MaximumConcurrency: 10
 
   LedgerPosterFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../functions/billing
       Handler: ledger_poster.lambda_handler
+      Timeout: 60
       Environment:
         Variables:
           JOURNAL_TABLE: !Ref JournalTable
           ACCOUNT_TABLE: !Ref AccountTable
+          MAX_PAGINATION_PAGES: "100"
+          MIN_REMAINING_MS: "5000"
+          LOG_LEVEL: WARNING
       Events:
         JournalEntries:
           Type: SQS
           Properties:
             Queue: !GetAtt LedgerQueue.Arn
             BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            ScalingConfig:
+              MaximumConcurrency: 10
 
   DunningSchedulerFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../functions/billing
       Handler: dunning_scheduler.lambda_handler
+      Timeout: 60
       Environment:
         Variables:
           INVOICE_TABLE: !Ref InvoiceTable
           DUNNING_QUEUE_URL: !Ref DunningQueue
+          MAX_INVOCATION_DEPTH: "3"
+          MIN_REMAINING_MS: "5000"
+          LOG_LEVEL: WARNING
       Events:
         DunningSteps:
           Type: SQS
           Properties:
             Queue: !GetAtt DunningQueue.Arn
             BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            ScalingConfig:
+              MaximumConcurrency: 10
 
   RefundDispatcherFunction:
     Type: AWS::Serverless::Function
     Properties:
       CodeUri: ../functions/billing
       Handler: refund_dispatcher.lambda_handler
+      Timeout: 60
       Environment:
         Variables:
           REFUND_TABLE: !Ref RefundTable
           CAPTURE_TABLE: !Ref CaptureTable
           LEDGER_QUEUE_URL: !Ref LedgerQueue
+          MAX_PAYLOAD_SIZE_BYTES: "262144"
+          MIN_REMAINING_MS: "5000"
+          LOG_LEVEL: WARNING
       Events:
         RefundRequests:
           Type: SQS
           Properties:
             Queue: !GetAtt RefundQueue.Arn
             BatchSize: 10
+            FunctionResponseTypes:
+              - ReportBatchItemFailures
+            ScalingConfig:
+              MaximumConcurrency: 10
+
+  # ---------------------------------------------------------------------------
+  # Log groups
+  # ---------------------------------------------------------------------------
+
+  CheckoutSubmitLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${CheckoutSubmitFunction}"
+      RetentionInDays: 30
+
+  CartPricingLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${CartPricingFunction}"
+      RetentionInDays: 30
+
+  OrderSearchLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${OrderSearchFunction}"
+      RetentionInDays: 30
+
+  OrderStatusStreamLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${OrderStatusStreamFunction}"
+      RetentionInDays: 30
+
+  InventoryAllocatorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${InventoryAllocatorFunction}"
+      RetentionInDays: 30
+
+  OrderArchiverLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${OrderArchiverFunction}"
+      RetentionInDays: 30
+
+  InvoiceGeneratorLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${InvoiceGeneratorFunction}"
+      RetentionInDays: 30
+
+  PaymentCaptureLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${PaymentCaptureFunction}"
+      RetentionInDays: 30
+
+  LedgerPosterLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${LedgerPosterFunction}"
+      RetentionInDays: 30
+
+  DunningSchedulerLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${DunningSchedulerFunction}"
+      RetentionInDays: 30
+
+  RefundDispatcherLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/aws/lambda/${RefundDispatcherFunction}"
+      RetentionInDays: 30
+
+  # ---------------------------------------------------------------------------
+  # DLQs
+  # ---------------------------------------------------------------------------
+
+  OrderStatusStreamDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'order-status-stream-dlq-${Stage}'
+      MessageRetentionPeriod: 1209600
+
+  InvoiceDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'invoice-requests-dlq-${Stage}'
+      MessageRetentionPeriod: 1209600
+
+  CaptureDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'capture-requests-dlq-${Stage}'
+      MessageRetentionPeriod: 1209600
+
+  LedgerDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'journal-entries-dlq-${Stage}'
+      MessageRetentionPeriod: 1209600
+
+  DunningDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'dunning-dlq-${Stage}'
+      MessageRetentionPeriod: 1209600
+
+  RefundDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'refund-requests-dlq-${Stage}'
+      MessageRetentionPeriod: 1209600
 
   # ---------------------------------------------------------------------------
   # Data stores
@@ -438,24 +621,36 @@ Resources:
     Properties:
       QueueName: !Sub 'invoice-requests-${Stage}'
       VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt InvoiceDLQ.Arn
+        maxReceiveCount: 5
 
   CaptureQueue:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub 'capture-requests-${Stage}'
       VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt CaptureDLQ.Arn
+        maxReceiveCount: 5
 
   LedgerQueue:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub 'journal-entries-${Stage}'
       VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt LedgerDLQ.Arn
+        maxReceiveCount: 5
 
   DunningQueue:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub 'dunning-${Stage}'
       VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt DunningDLQ.Arn
+        maxReceiveCount: 5
 
   RefundQueue:
     Type: AWS::SQS::Queue
@@ -463,7 +658,7 @@ Resources:
       QueueName: !Sub 'refund-requests-${Stage}'
       VisibilityTimeout: 300
       RedrivePolicy:
-        deadLetterTargetArn: !GetAtt RefundQueue.Arn
+        deadLetterTargetArn: !GetAtt RefundDLQ.Arn
         maxReceiveCount: 5
 
   OrderNotificationTopic:
