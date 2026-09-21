@@ -22,6 +22,75 @@ Parameters:
 Resources:
 
   # ---------------------------------------------------------------------------
+  # API Gateway with request validation and throttling
+  # ---------------------------------------------------------------------------
+
+  CommerceApi:
+    Type: AWS::Serverless::Api
+    Properties:
+      StageName: !Ref Stage
+      Auth:
+        DefaultAuthorizer: NONE
+      Models:
+        CheckoutRequestModel:
+          type: object
+          required:
+            - customer_id
+            - items
+          properties:
+            customer_id:
+              type: string
+              maxLength: 128
+            items:
+              type: array
+              maxItems: 100
+              items:
+                type: object
+                required:
+                  - sku
+                  - quantity
+                properties:
+                  sku:
+                    type: string
+                    maxLength: 64
+                  quantity:
+                    type: integer
+                    minimum: 1
+                    maximum: 9999
+        CartPricingRequestModel:
+          type: object
+          required:
+            - items
+          properties:
+            items:
+              type: array
+              maxItems: 100
+              items:
+                type: object
+                required:
+                  - sku
+                  - quantity
+                properties:
+                  sku:
+                    type: string
+                    maxLength: 64
+                  quantity:
+                    type: integer
+                    minimum: 1
+                    maximum: 9999
+            promotion_codes:
+              type: array
+              maxItems: 20
+              items:
+                type: string
+                maxLength: 64
+      MethodSettings:
+        - ResourcePath: "/*"
+          HttpMethod: "*"
+          ThrottlingBurstLimit: 100
+          ThrottlingRateLimit: 50
+
+  # ---------------------------------------------------------------------------
   # orders/  -- packaging root is ../functions/orders
   # ---------------------------------------------------------------------------
 
@@ -43,8 +112,13 @@ Resources:
         Post:
           Type: Api
           Properties:
+            RestApiId: !Ref CommerceApi
             Path: /checkout
             Method: post
+            RequestModel:
+              Model: CheckoutRequestModel
+              Required: true
+              ValidateBody: true
 
   CartPricingFunction:
     Type: AWS::Serverless::Function
@@ -63,8 +137,13 @@ Resources:
         Post:
           Type: Api
           Properties:
+            RestApiId: !Ref CommerceApi
             Path: /cart/price
             Method: post
+            RequestModel:
+              Model: CartPricingRequestModel
+              Required: true
+              ValidateBody: true
 
   OrderSearchFunction:
     Type: AWS::Serverless::Function
@@ -82,8 +161,12 @@ Resources:
         Get:
           Type: Api
           Properties:
+            RestApiId: !Ref CommerceApi
             Path: /orders
             Method: get
+            RequestParameters:
+              - method.request.querystring.customer_id:
+                  Required: true
 
   OrderStatusStreamFunction:
     Type: AWS::Serverless::Function
@@ -119,6 +202,13 @@ Resources:
       CodeUri: ../functions/orders
       Handler: inventory_allocator.lambda_handler
       Timeout: 60
+      EventInvokeConfig:
+        MaximumRetryAttempts: 1
+        MaximumEventAgeInSeconds: 300
+        DestinationConfig:
+          OnFailure:
+            Destination: !GetAtt InventoryAllocatorDLQ.Arn
+            Type: SQS
       Environment:
         Variables:
           INVENTORY_TABLE: !Ref InventoryTable
@@ -142,6 +232,13 @@ Resources:
           MAX_PAGINATION_PAGES: "100"
           MIN_REMAINING_MS: "5000"
           LOG_LEVEL: WARNING
+      EventInvokeConfig:
+        MaximumRetryAttempts: 1
+        MaximumEventAgeInSeconds: 300
+        DestinationConfig:
+          OnFailure:
+            Destination: !GetAtt OrderArchiverDLQ.Arn
+            Type: SQS
       Events:
         Nightly:
           Type: Schedule
@@ -382,6 +479,18 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub 'refund-requests-dlq-${Stage}'
+      MessageRetentionPeriod: 1209600
+
+  OrderArchiverDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'order-archiver-dlq-${Stage}'
+      MessageRetentionPeriod: 1209600
+
+  InventoryAllocatorDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'inventory-allocator-dlq-${Stage}'
       MessageRetentionPeriod: 1209600
 
   # ---------------------------------------------------------------------------
@@ -674,4 +783,4 @@ Resources:
 Outputs:
   ApiEndpoint:
     Description: Commerce API base URL
-    Value: !Sub 'https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod'
+    Value: !Sub 'https://${CommerceApi}.execute-api.${AWS::Region}.amazonaws.com/${Stage}'

@@ -306,6 +306,58 @@ resource "aws_s3_bucket" "reports" {
 }
 
 # -----------------------------------------------------------------------------
+# Async retry bounds and DLQ wiring
+# -----------------------------------------------------------------------------
+
+resource "aws_lambda_function_event_invoke_config" "fleet_command_fanout" {
+  function_name          = aws_lambda_function.telemetry["fleet_command_fanout"].function_name
+  maximum_retry_attempts = 1
+  maximum_event_age_in_seconds = 300
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.telemetry_dlq.arn
+    }
+  }
+}
+
+resource "aws_lambda_function_event_invoke_config" "telemetry_rollup" {
+  function_name          = aws_lambda_function.telemetry["telemetry_rollup"].function_name
+  maximum_retry_attempts = 1
+  maximum_event_age_in_seconds = 300
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.telemetry_dlq.arn
+    }
+  }
+}
+
+resource "aws_lambda_function_event_invoke_config" "revenue_reconciliation" {
+  function_name          = aws_lambda_function.reporting["revenue_reconciliation"].function_name
+  maximum_retry_attempts = 1
+  maximum_event_age_in_seconds = 300
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.reporting_dlq.arn
+    }
+  }
+}
+
+resource "aws_lambda_function_event_invoke_config" "usage_metering" {
+  function_name          = aws_lambda_function.reporting["usage_metering"].function_name
+  maximum_retry_attempts = 1
+  maximum_event_age_in_seconds = 300
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.reporting_dlq.arn
+    }
+  }
+}
+
+# -----------------------------------------------------------------------------
 # Data stores
 # -----------------------------------------------------------------------------
 

@@ -88,6 +88,15 @@ class PlatformStack(Stack):
             "TenantProvisioningQueue",
             queue_name="tenant-provisioning",
             visibility_timeout=Duration.seconds(300),
+            dead_letter_queue=sqs.DeadLetterQueue(
+                max_receive_count=5,
+                queue=sqs.Queue(
+                    self,
+                    "ProvisioningRedriveTarget",
+                    queue_name="provisioning-redrive-dlq",
+                    retention_period=Duration.days(14),
+                ),
+            ),
         )
 
         # DLQs
@@ -104,9 +113,6 @@ class PlatformStack(Stack):
             queue_name="provisioning-dlq",
             retention_period=Duration.days(14),
         )
-
-        # Add redrive policy on provisioning queue
-        # (CDK doesn't allow redrive after construction easily, so we set it on the DLQ side)
 
         self.data_bucket = s3.Bucket(
             self,
@@ -140,6 +146,15 @@ class PlatformStack(Stack):
         )
         self.router_topic.add_subscription(
             subscriptions.LambdaSubscription(notification_router)
+        )
+        # Async retry bounds for SNS-triggered function
+        lambda_.EventInvokeConfig(
+            self,
+            "NotificationRouterRetry",
+            function=notification_router,
+            max_event_age=Duration.minutes(5),
+            retry_attempts=1,
+            on_failure=lambda_.destinations.SqsDestination(self.platform_dlq) if hasattr(lambda_, "destinations") else None,
         )
         self.router_topic.grant_publish(notification_router)
         self.preference_table.grant_read_data(notification_router)
@@ -216,9 +231,45 @@ class PlatformStack(Stack):
                 **guard_env,
             },
         )
-        api = apigw.RestApi(self, "PlatformApi", rest_api_name="platform")
+        api = apigw.RestApi(self, "PlatformApi", rest_api_name="platform",
+            deploy_options=apigw.StageOptions(
+                throttling_burst_limit=100,
+                throttling_rate_limit=50,
+            ),
+        )
+        tenant_model = api.add_model(
+            "TenantRequestModel",
+            content_type="application/json",
+            model_name="TenantRequestModel",
+            schema=apigw.JsonSchema(
+                schema=apigw.JsonSchemaVersion.DRAFT4,
+                type=apigw.JsonSchemaType.OBJECT,
+                required=["tenant_name", "admin_email"],
+                properties={
+                    "tenant_name": apigw.JsonSchema(
+                        type=apigw.JsonSchemaType.STRING,
+                        max_length=128,
+                    ),
+                    "admin_email": apigw.JsonSchema(
+                        type=apigw.JsonSchemaType.STRING,
+                        max_length=256,
+                    ),
+                    "plan": apigw.JsonSchema(
+                        type=apigw.JsonSchemaType.STRING,
+                        enum=["free", "starter", "business", "enterprise"],
+                    ),
+                },
+            ),
+        )
+        request_validator = api.add_request_validator(
+            "BodyValidator",
+            validate_request_body=True,
+        )
         api.root.add_resource("tenants").add_method(
-            "POST", apigw.LambdaIntegration(tenant_provisioner)
+            "POST",
+            apigw.LambdaIntegration(tenant_provisioner),
+            request_models={"application/json": tenant_model},
+            request_validator=request_validator,
         )
         tenant_provisioner.add_event_source(
             sources.SqsEventSource(
