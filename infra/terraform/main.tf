@@ -357,6 +357,30 @@ resource "aws_lambda_function_event_invoke_config" "usage_metering" {
   }
 }
 
+resource "aws_lambda_function_event_invoke_config" "device_shadow_sync" {
+  function_name          = aws_lambda_function.telemetry["device_shadow_sync"].function_name
+  maximum_retry_attempts = 1
+  maximum_event_age_in_seconds = 300
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.telemetry_dlq.arn
+    }
+  }
+}
+
+resource "aws_lambda_function_event_invoke_config" "cohort_export" {
+  function_name          = aws_lambda_function.reporting["cohort_export"].function_name
+  maximum_retry_attempts = 1
+  maximum_event_age_in_seconds = 300
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.reporting_dlq.arn
+    }
+  }
+}
+
 # -----------------------------------------------------------------------------
 # Data stores
 # -----------------------------------------------------------------------------

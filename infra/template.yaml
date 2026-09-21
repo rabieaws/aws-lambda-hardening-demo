@@ -358,6 +358,9 @@ Resources:
           CAPTURE_TABLE: !Ref CaptureTable
           LEDGER_QUEUE_URL: !Ref LedgerQueue
           MAX_PAYLOAD_SIZE_BYTES: "262144"
+          MAX_RETRIES: "3"
+          MAX_BACKOFF_SECONDS: "10.0"
+          MAX_LOOP_ITERATIONS: "1000"
           MIN_REMAINING_MS: "5000"
           LOG_LEVEL: WARNING
       Events:
@@ -491,6 +494,12 @@ Resources:
     Type: AWS::SQS::Queue
     Properties:
       QueueName: !Sub 'inventory-allocator-dlq-${Stage}'
+      MessageRetentionPeriod: 1209600
+
+  FulfilmentDLQ:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: !Sub 'fulfilment-dlq-${Stage}'
       MessageRetentionPeriod: 1209600
 
   # ---------------------------------------------------------------------------
@@ -724,6 +733,9 @@ Resources:
     Properties:
       QueueName: !Sub 'fulfilment-${Stage}'
       VisibilityTimeout: 300
+      RedrivePolicy:
+        deadLetterTargetArn: !GetAtt FulfilmentDLQ.Arn
+        maxReceiveCount: 5
 
   InvoiceQueue:
     Type: AWS::SQS::Queue

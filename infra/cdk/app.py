@@ -10,6 +10,7 @@ from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_events as events
 from aws_cdk import aws_events_targets as targets
 from aws_cdk import aws_lambda as lambda_
+from aws_cdk import aws_lambda_destinations as destinations
 from aws_cdk import aws_lambda_event_sources as sources
 from aws_cdk import aws_logs as logs
 from aws_cdk import aws_s3 as s3
@@ -154,7 +155,7 @@ class PlatformStack(Stack):
             function=notification_router,
             max_event_age=Duration.minutes(5),
             retry_attempts=1,
-            on_failure=lambda_.destinations.SqsDestination(self.platform_dlq) if hasattr(lambda_, "destinations") else None,
+            on_failure=destinations.SqsDestination(self.platform_dlq),
         )
         self.router_topic.grant_publish(notification_router)
         self.preference_table.grant_read_data(notification_router)
@@ -203,7 +204,7 @@ class PlatformStack(Stack):
             function=audit_replay,
             max_event_age=Duration.minutes(5),
             retry_attempts=1,
-            on_failure=lambda_.destinations.SqsDestination(self.platform_dlq) if hasattr(lambda_, "destinations") else None,
+            on_failure=destinations.SqsDestination(self.platform_dlq),
         )
         events.Rule(
             self,
@@ -278,6 +279,15 @@ class PlatformStack(Stack):
                 report_batch_item_failures=True,
                 max_concurrency=10,
             )
+        )
+        # Async retry bounds for tenant_provisioner
+        lambda_.EventInvokeConfig(
+            self,
+            "TenantProvisionerRetry",
+            function=tenant_provisioner,
+            max_event_age=Duration.minutes(5),
+            retry_attempts=1,
+            on_failure=destinations.SqsDestination(self.provisioning_dlq),
         )
         self.tenant_table.grant_read_write_data(tenant_provisioner)
         self.data_bucket.grant_read_write(tenant_provisioner)

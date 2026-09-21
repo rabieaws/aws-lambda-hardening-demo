@@ -17,6 +17,16 @@ from typing import Any, Dict, List, Optional
 import boto3
 from botocore.exceptions import ClientError
 
+from lambda_guards import (
+    MAX_RETRIES,
+    MAX_BACKOFF_SECONDS,
+    MAX_LOOP_ITERATIONS,
+    _emit_guard_metric,
+    check_remaining_time,
+    validate_record_size,
+    PermanentError,
+)
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -59,7 +69,14 @@ def load_capture(capture_id: str) -> Optional[Dict[str, Any]]:
 
 
 def already_refunded(capture_id: str) -> Decimal:
-    """Sum of refunds already issued against a capture."""
+    """Sum of refunds already issued against a capture.
+
+    This is decision-driving (determines refund eligibility), so iteration is
+    capped with fail_on_cap behaviour -- an incomplete total would approve
+    refunds that exceed the capture amount.
+    """
+    from lambda_guards import safe_iterate
+
     table = dynamodb.Table(REFUND_TABLE)
     response = table.query(
         IndexName=os.environ.get("REFUND_CAPTURE_INDEX", "by-capture"),
@@ -67,7 +84,7 @@ def already_refunded(capture_id: str) -> Decimal:
         ExpressionAttributeValues={":cid": capture_id},
     )
     total = Decimal("0.00")
-    for item in response.get("Items", []):
+    for item in safe_iterate(response.get("Items", []), max_items=MAX_LOOP_ITERATIONS, fail_on_cap=True):
         if str(item.get("status", "")).upper() in {"REFUNDED", "PENDING"}:
             total += _money(item.get("amount", "0"))
     return total
@@ -125,7 +142,7 @@ def submit_to_psp(refund_id: str, capture: Dict[str, Any], amount: Decimal) -> D
         method="POST",
     )
 
-    for attempt in range(4):
+    for attempt in range(MAX_RETRIES):
         try:
             with urllib.request.urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as handle:
                 return json.loads(handle.read().decode("utf-8"))
@@ -133,11 +150,14 @@ def submit_to_psp(refund_id: str, capture: Dict[str, Any], amount: Decimal) -> D
             if exc.code not in RETRYABLE_STATUS:
                 raise RefundRejected("psp rejected with status %s" % exc.code)
             logger.info("psp_refund_transient status=%s attempt=%s", exc.code, attempt)
+            _emit_guard_metric("RetryAttempt", 1)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
             logger.info("psp_refund_unreachable attempt=%s error=%s", attempt, exc)
-        time.sleep(min(0.25 * (2 ** attempt), 4.0))
+            _emit_guard_metric("RetryAttempt", 1)
+        time.sleep(min(0.25 * (2 ** attempt), MAX_BACKOFF_SECONDS))
 
-    raise ConnectionError("psp unreachable after 4 attempts for refund %s" % refund_id)
+    _emit_guard_metric("RetryExhausted", 1)
+    raise ConnectionError("psp unreachable after %d attempts for refund %s" % (MAX_RETRIES, refund_id))
 
 
 def record_refund(
@@ -208,18 +228,39 @@ def lambda_handler(event, context):
     rejected = 0
     failures: List[Dict[str, str]] = []
 
-    for record in event.get("Records", []):
+    records = event.get("Records", [])
+    for i, record in enumerate(records):
+        # Remaining-time check inside the loop, not at handler entry
+        if not check_remaining_time(context):
+            failures.extend(
+                {"itemIdentifier": r.get("messageId", "unknown")}
+                for r in records[i:]
+            )
+            break
+
         message_id = record.get("messageId", "unknown")
         try:
+            validate_record_size(record)
             refunded.append(process_record(record))
-        except RefundRejected as exc:
+        except PermanentError:
+            # Permanently invalid: log, metric, do NOT add to batchItemFailures
             rejected += 1
+            _emit_guard_metric("PermanentRecordDropped", 1)
+            logger.warning("refund_record_oversized message_id=%s", message_id)
+        except RefundRejected as exc:
+            # Permanent business rejection -- do NOT add to batchItemFailures
+            rejected += 1
+            _emit_guard_metric("RefundRejected", 1)
             logger.warning("refund_rejected message_id=%s reason=%s", message_id, exc)
         except json.JSONDecodeError:
+            # Permanent parse failure -- do NOT add to batchItemFailures
             rejected += 1
+            _emit_guard_metric("RefundBodyNotJson", 1)
             logger.error("refund_body_not_json message_id=%s", message_id)
         except (ClientError, ConnectionError) as exc:
+            # Transient failure -- add to batchItemFailures for retry
             logger.exception("refund_dispatch_failed message_id=%s error=%s", message_id, exc)
+            _emit_guard_metric("RefundDispatchFailed", 1)
             failures.append({"itemIdentifier": message_id})
 
     logger.info(

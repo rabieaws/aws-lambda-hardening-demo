@@ -37,9 +37,13 @@ IMMEDIATE_COMMANDS = {"reboot", "factory_reset", "emergency_stop"}
 
 
 def read_invocation_depth(record: Dict[str, Any]) -> int:
-    """Read the fan-out depth carried on the inbound message."""
+    """Read the fan-out depth carried on the inbound message.
+
+    Uses the standard 'invocation_depth' attribute name to match what
+    increment_sns_depth writes via lambda_guards.
+    """
     attributes = record.get("Sns", {}).get("MessageAttributes", {}) or {}
-    raw = attributes.get("fanout_depth", {}).get("Value", "0")
+    raw = attributes.get("invocation_depth", {}).get("Value", "0")
     try:
         return int(raw)
     except (TypeError, ValueError):
