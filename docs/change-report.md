@@ -59,7 +59,7 @@ Deployed as per-directory copies in 7 domain directories. Contains:
 | Handler | Event Source | Guards Applied |
 |---------|-------------|----------------|
 | checkout_submit | API GW POST | payload validation (413), request validation via API GW model |
-| cart_pricing | API GW POST | payload validation (413), safe_paginate, request validation via API GW model |
+| cart_pricing | API GW POST | payload validation (413), safe_paginate (fail_on_cap=True, decision-driving), request validation via API GW model |
 | order_search | API GW GET | safe_paginate, request param validation via API GW |
 | order_status_stream | DynamoDB Streams | batchItemFailures, remaining-time in loop, record validation |
 | inventory_allocator | Async | payload validation, retry cap (MAX_RETRIES), backoff cap |
@@ -142,7 +142,7 @@ both happy-path and error-path scenarios for handlers with control-flow rewrites
 | fleet_command_fanout | MAX_INVOCATION_DEPTH | Depth >= 3 | `{"status": "depth_exceeded"}` per command |
 | audit_event_replay | check_eventbridge_invocation_depth | Depth >= 3 | `{"status": "DEPTH_EXCEEDED"}` |
 | device_shadow_sync | check_invoke_depth | Depth >= 3 | `{"status": "DEPTH_EXCEEDED"}` |
-| cart_pricing | safe_paginate cap | > 100 pages | Truncated promotion list, PaginationCapReached metric |
+| cart_pricing | safe_paginate (fail_on_cap=True) | > 100 pages | IterationCapExceeded raised, 500 response, PaginationCapReached metric |
 | ledger_poster | safe_paginate (fail_on_cap) | > 100 pages | IterationCapExceeded raised, record fails to batchItemFailures |
 | revenue_reconciliation | safe_paginate (fail_on_cap) | > 100 pages | IterationCapExceeded raised |
 

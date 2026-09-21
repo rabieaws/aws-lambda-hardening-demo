@@ -42,7 +42,7 @@ def iter_active_promotions(channel: str) -> Iterator[Dict[str, Any]]:
 
     client = dynamodb.meta.client
     paginator = client.get_paginator("query")
-    for page in safe_paginate(paginator,
+    for page in safe_paginate(paginator, fail_on_cap=True,
         TableName=PROMOTION_TABLE,
         IndexName=PROMOTION_INDEX,
         KeyConditionExpression="#st = :active",
