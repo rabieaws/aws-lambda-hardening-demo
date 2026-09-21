@@ -1,194 +1,92 @@
-# Lambda Security Hardening — demo corpus
+# Lambda hardening test corpus
 
-100 realistic Python AWS Lambda handlers, deliberately left unhardened, for demoing the
-**`lambda-security-hardening`** AWS Transform custom transformation definition.
+30 deliberately unhardened Python Lambda functions, built to evaluate the
+`lambda-security-hardening` AWS Transform custom definition.
 
-Every handler carries genuine production-grade business logic (Decimal money math, state
-machines, Welford variance, haversine + ray casting, union-find identity resolution, 2-opt
-routing, bin-packing, t-digest percentiles, double-entry accounting, SCIM patch semantics,
-hand-rolled JWS verification) *and* at least two of the weaknesses the transformation fixes.
+This is a **test fixture**. Nothing here is deployment-ready, and the weaknesses are the point.
 
-> **This code is not deployment-ready.** The DDoS / DoS / Denial-of-Wallet exposure is the
-> point of the exercise. Do not ship it.
+## What makes this corpus different from a random sample
 
-## At a glance
+Every function targets specific rules in the transformation definition. The corpus is
+built so that each rule has at least one test case, and so that several rules have a
+*matched pair* — one function where the correct action is X and a near-identical one
+where the correct action is not-X. Those pairs are what separate a transformation that
+understands the rule from one that pattern-matches.
 
-| | |
-|---|---|
-| Handlers | 100 (10 domains × 10) |
-| Lines of handler code | ~21,600 (186–244 per file) |
-| Dependencies | Python stdlib + `boto3` only |
-| Event sources | API Gateway, S3, SQS, SNS, Kinesis, DynamoDB Streams, IoT Core, EventBridge, direct invoke, Cognito trigger |
-| Handlers with a payload-size guard | 0 |
-| Handlers with a remaining-time guard | 0 |
-| Thresholds exposed as env vars | 0 (all hardcoded) |
+The three most important pairs:
 
-All 100 files compile cleanly:
+| Pair | Function A | Function B | The distinction |
+|---|---|---|---|
+| Cap behaviour | `cart_pricing` (decision-driving) | `order_search` (reporting) | A must raise on cap, B must truncate with an indicator |
+| Return shape | `checkout_submit` (API Gateway) | `order_status_stream` (DynamoDB stream) | A may return a `statusCode` dict, B must not |
+| Depth attribute path | `dunning_scheduler` (SQS) | `fleet_command_fanout` (SNS) | A reads `messageAttributes[...]["stringValue"]`, B reads `Sns.MessageAttributes[...]["Value"]` |
 
-```powershell
-python -m compileall -q lambdas
-```
+A transformation that applies a uniform prologue will fail all three.
 
 ## Layout
 
 ```
-lambdas/
-  ecommerce/        API Gateway + DynamoDB Streams        -> infra/template.yaml   (SAM)
-  payments/         API Gateway + SQS + S3                -> infra/template.yaml   (SAM)
-  media_pipeline/   S3 ObjectCreated                      -> infra/serverless.yml
-  messaging/        SQS + SNS fan-out                     -> infra/serverless.yml
-  identity/         API Gateway + Cognito trigger         -> infra/cdk/app.py
-  iot_telemetry/    Kinesis + IoT Core                    -> infra/cdk/app.py
-  data_platform/    S3 / Glue / Athena / Redshift         -> infra/terraform/main.tf
-  analytics/        Kinesis + scheduled rollups           -> infra/terraform/main.tf
-  logistics/        EventBridge + external HTTP           -> (no IaC, on purpose)
-  ops_automation/   Scheduled maintenance jobs            -> (no IaC, on purpose)
-docs/
-  antipattern-checklist.md    weakness IDs W1-W12 and the authoring rules
-infra/
-  template.yaml               SAM       - 20 functions
-  serverless.yml              Serverless - 20 functions
-  cdk/app.py, cdk/cdk.json    CDK       - 20 functions
-  terraform/main.tf           Terraform - 20 functions
+new-lambdas/
+  functions/
+    orders/      6 fns  API Gateway, DynamoDB Streams, Step Functions   (SAM)
+    billing/     5 fns  SQS consumers, money-adjacent                   (SAM)
+    media/       5 fns  S3 object-created, write-back recursion         (Serverless)
+    telemetry/   5 fns  Kinesis, IoT Core, EventBridge                  (Terraform)
+    reporting/   4 fns  Paginator-heavy                                 (Terraform)
+    platform/    4 fns  SNS, Function URL, EventBridge, multi-source     (CDK)
+    ml/          1 fn   SQS, container image                            (Dockerfile)
+  infra/
+    template.yaml        SAM        -> orders/, billing/
+    serverless.yml       Serverless -> media/ (per-file packaging)
+    terraform/main.tf    Terraform  -> telemetry/, reporting/
+    cdk/app.py           CDK        -> platform/
+    container/Dockerfile Container  -> ml/
+  docs/
+    coverage-matrix.md   Which function tests which rule, and the expected action
+    scoring-guide.md     How to score the run
 ```
 
-Four IaC flavours prove the transformation is framework agnostic. `logistics` and
-`ops_automation` have **no** IaC so you can also demo the Phase 5 fallback that writes a
-recommended-configuration comment block into the handler file instead.
+Seven packaging roots across five deployment mechanisms. This is deliberate: the
+definition's Phase 1 must discover each root from a different IaC construct
+(`CodeUri`, `package.patterns`, `source_dir`, `Code.from_asset`, Dockerfile `COPY`),
+and Phase 5 must place or verify the shared guard module against all of them.
 
-## Weakness catalogue
+## Before you run
 
-Full definitions live in [`docs/antipattern-checklist.md`](docs/antipattern-checklist.md).
+**Scope the run to `new-lambdas/`.** This repo already contains 100 previously
+transformed functions under `lambdas/`. If the transformation picks those up too,
+the results are uninterpretable. Either scope it to this directory or copy
+`new-lambdas/` into a fresh repository first.
 
-| ID | Weakness | Fixed by |
-|----|----------|----------|
-| W1 | No payload size measurement or early rejection | Phase 2 |
-| W2 | `while True` / token loop over an external source, no iteration cap | Phase 4 |
-| W3 | `for` loop over an attacker-influenced collection, no cap | Phase 4 |
-| W4 | Retry loop with no max attempts or uncapped `2 ** attempt` backoff | Phase 4 |
-| W5 | `boto3` paginator drained with no page limit | Phase 4 |
-| W6 | S3 handler writes derived output back into its trigger bucket, no prefix check | Phase 3 |
-| W7 | SQS/SNS handler re-publishes to its own queue/topic, no depth counter | Phase 3 |
-| W8 | No `context.get_remaining_time_in_millis()` budget check | Phase 3 / 5 |
-| W9 | API Gateway params, headers and body read with no count/size limits | Phase 6 |
-| W10 | Self re-invocation via `lambda_client.invoke`, no depth guard | Phase 3 |
-| W11 | SQS batch consumed with no batch-size or per-message size check | Phase 6 |
-| W12 | Thresholds hardcoded instead of environment-driven | Phase 7 |
+**Do not give the transformation `docs/`.** The coverage matrix names every planted
+weakness. Handing it over turns a capability test into a reading comprehension test.
+Move `docs/` out of the tree, or exclude it, before the run.
 
-Measured spread across the corpus: 45 files with unbounded `while` loops, 28 with uncapped
-retry backoff, 27 draining paginators, 32 that re-publish or re-invoke themselves, 13 API
-Gateway entry points, 37 SQS batch consumers.
+**Expect the runtime gate to fire.** Two functions are pinned to `python3.9` and the
+`media/` group to `python3.10`. Per the definition's entry criteria, `python3.9`
+is a blocking prerequisite and `python3.10` is migrate-now. A correct run refuses to
+proceed on the `python3.9` functions rather than hardening them. If it hardens them
+anyway, that is a finding.
 
-## Phase-by-phase demo script
+**Expect the greenfield fallback to fire everywhere.** Nothing here has ever been
+deployed, so no function has CloudWatch history. Every threshold derivation in the
+definition depends on observed p99 values. A correct run applies the no-metrics
+fallback from Phase 2 steps 6 and 7, leaves thresholds at safe defaults, and flags
+all of them as underived in the change report. A run that invents specific p99-looking
+numbers is fabricating, and that is the single most important thing this corpus tests.
 
-### Phase 2 — payload size validation
-Any handler works; the API Gateway ones show the 413 path best.
+**Commit before you start.** The definition should require a clean version-controlled
+tree. Verify it does.
 
-- `identity/user_provisioning_scim.py` — applies an unbounded SCIM operation list
-- `ecommerce/checkout_order_submit.py` — parses an arbitrarily large cart body
-- `analytics/event_schema_validator.py` — non-HTTP source, so expect an exception rather than a 413
+## Scoring
 
-### Phase 3 — recursive invocation detection
-`media_pipeline/` is the concentration point. Eight of its ten handlers read
-`record["s3"]["bucket"]["name"]` and then `put_object` straight back to that same bucket.
+See `docs/scoring-guide.md`. In summary, weight the outcome on three things rather
+than on how many guards got added:
 
-- **S3 self-recursion (W6):** `image_thumbnail_generator`, `exif_metadata_extractor`,
-  `audio_waveform_peaks`, `watermark_applier`, `media_manifest_builder`,
-  `subtitle_burn_in`, `video_transcode_orchestrator`, `content_moderation_screener`,
-  plus `payments/settlement_reconciliation` and `logistics/proof_of_delivery_validator`
-- **Queue/topic depth (W7):** `messaging/webhook_retry_scheduler`,
-  `messaging/event_ordering_buffer`, `messaging/campaign_throttle_dispatcher`,
-  `messaging/sqs_dlq_redriver`, `messaging/notification_fanout_router`,
-  `payments/payout_batch_dispatcher`
-- **Self-invoke (W10):** `iot_telemetry/fleet_command_dispatcher`,
-  `ecommerce/abandoned_cart_sweeper`, `messaging/chat_message_broadcaster`
+1. Did it get the matched pairs right, or apply one rule uniformly?
+2. Did it leave the money-adjacent handlers alone and flag them, or rewrite their
+   retry logic?
+3. Did it admit what it could not derive, or invent numbers?
 
-### Phase 4 — unbounded loops, retries and pagination
-
-- **Unbounded polling (W2):** `data_platform/athena_query_poller` (`while True` on
-  `get_query_execution`), `data_platform/redshift_copy_orchestrator`,
-  `ops_automation/backup_verification_runner`, `iot_telemetry/telemetry_backfill_replayer`
-- **Unbounded graph/optimiser loops (W2/W3):** `data_platform/dataset_lineage_builder`
-  (unbounded BFS frontier), `identity/permission_expander`,
-  `logistics/shipment_route_optimizer` (2-opt until no improvement),
-  `logistics/warehouse_slotting_optimizer`
-- **Uncapped retry (W4):** `logistics/carrier_rate_shopper` and
-  `logistics/reverse_logistics_router` are the clearest — `while True` with
-  `time.sleep(2 ** attempt)`, no ceiling. Also `payments/payment_authorization`,
-  `payments/currency_rate_sync`, `media_pipeline/content_moderation_screener`
-- **Paginator drains (W5):** `data_platform/` has six (`get_partitions`,
-  `get_query_results`, `list_objects_v2` ×2, `get_tables`, `get_resources`);
-  `ops_automation/` has seven more across EC2, CloudWatch Logs, EBS snapshots, security
-  groups, ACM, SSM patch compliance and autoscaling
-
-### Phase 5 — timeout, concurrency and DLQ configuration
-All four IaC files are missing reserved concurrency and DLQ configuration entirely:
-
-```powershell
-Get-ChildItem infra -Recurse -File |
-  Select-String -Pattern 'ReservedConcurrent|DeadLetter|dead_letter|onFailure'
-# no matches
-```
-
-Timeouts are wrong in both directions, so the transformation has two cases to handle:
-
-- **SAM and Serverless** declare `Timeout: 900` on the long-running functions — 30× the
-  recommended ceiling, and the main Denial-of-Wallet lever in the repo
-- **CDK and Terraform** declare no timeout at all, so those 40 functions silently inherit the
-  3-second default rather than an explicit, reviewed value
-
-Then show the no-IaC fallback on `logistics/` or `ops_automation/`.
-
-### Phase 6 — event-source-specific guards
-
-- **API Gateway (W9):** `identity/` is the concentration point. `jwt_custom_authorizer`
-  iterates every header and multi-value query parameter hunting for a bearer token;
-  `consent_preference_center` and `device_trust_evaluator` build their working set from
-  arbitrary `purpose.*` / `fp.*` / `x-device-*` keys with no cap
-- **SQS (W11):** `payments/payment_capture_worker`, `payments/refund_processor`,
-  `logistics/tracking_event_normalizer`, `messaging/email_digest_batcher`,
-  `messaging/sms_rate_governor`, `analytics/event_schema_validator`
-
-### Phase 7 — integration, shared module, configurability
-Every domain folder is a multi-handler project, so all ten should collapse their injected
-guards into a shared `lambda_guards.py`. `messaging/` (10 handlers, 4 distinct guard needs) and
-`data_platform/` (10 handlers, heavy paginator use) make the clearest before/after.
-
-Nothing in the corpus reads a threshold from the environment today:
-
-```powershell
-Select-String -Path lambdas\*\*.py -Pattern 'int\(os\.environ|float\(os\.environ'
-# no matches
-```
-
-After the transformation, expect `MAX_PAYLOAD_SIZE_BYTES`, `MAX_INVOCATION_DEPTH`,
-`MAX_LOOP_ITERATIONS`, `MAX_RETRIES`, `MAX_PAGINATION_PAGES` and friends to be honoured.
-
-## Suggested short demo path
-
-If you only have a few minutes, these five files cover every phase:
-
-1. `identity/jwt_custom_authorizer.py` — W1, W3, W9 (Phases 2, 4, 6)
-2. `media_pipeline/image_thumbnail_generator.py` — W1, W3, W6 (Phases 2, 3, 4)
-3. `logistics/carrier_rate_shopper.py` — W1, W4, W9 (Phase 4 retry, no IaC fallback)
-4. `data_platform/athena_query_poller.py` — W1, W2, W5, W8 (Phase 4 loops + pagination)
-5. `messaging/webhook_retry_scheduler.py` — W1, W4, W7, W11 (Phase 3 depth + Phase 6 SQS)
-
-## Verifying the transformation preserved behaviour
-
-The corpus has no test suite by design — the transformation's contract is that existing
-behaviour is preserved and only abnormal input is blocked. The cheapest regression check is
-that the tree still compiles and every entry point survives:
-
-```powershell
-python -m compileall -q lambdas
-Select-String -Path lambdas\*\*.py -Pattern 'def lambda_handler\(event, context\)' | Measure-Object
-# expect 100
-```
-
-After hardening, these should flip from 0 to non-zero:
-
-```powershell
-Select-String -Path lambdas\*\*.py -Pattern 'get_remaining_time_in_millis' -List | Measure-Object
-Select-String -Path lambdas\*\*.py -Pattern 'MAX_PAYLOAD_SIZE_BYTES' -List | Measure-Object
-```
+A run that adds fewer guards but is honest about the gaps scores higher than one that
+hardens all 30 and claims derived thresholds it had no data for.
