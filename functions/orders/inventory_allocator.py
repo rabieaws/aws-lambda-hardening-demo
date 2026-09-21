@@ -218,6 +218,10 @@ def _destination(event: Dict[str, Any]) -> Tuple[float, float]:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import validate_payload_size
+
+    validate_payload_size(event)
+
     order_id = str(event.get("order_id", "")).strip()
     lines = event.get("lines") or []
     if not order_id or not lines:

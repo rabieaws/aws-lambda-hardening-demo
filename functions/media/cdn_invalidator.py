@@ -121,7 +121,9 @@ def summarise(keys: List[str], paths: List[str], stats: Dict[str, int]) -> Dict[
 
 
 def lambda_handler(event, context):
-    from lambda_guards import check_s3_recursive_invocation
+    from lambda_guards import check_s3_recursive_invocation, validate_payload_size
+
+    validate_payload_size(event)
 
     if not DISTRIBUTION_ID:
         logger.warning("distribution_unconfigured skipping_invalidation=1")

@@ -210,6 +210,8 @@ def persist_rated_usage(
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_remaining_time
+
     window_start, window_end, window_label = _window(int(time.time()))
     logger.info("metering_start window=%s", window_label)
 
@@ -220,6 +222,9 @@ def lambda_handler(event, context):
     accounts_touched = set()
 
     for (account_id, metric), units in sorted(totals.items()):
+        if not check_remaining_time(context):
+            logger.warning("metering_time_remaining_low, stopping early")
+            break
         if units <= 0:
             continue
 

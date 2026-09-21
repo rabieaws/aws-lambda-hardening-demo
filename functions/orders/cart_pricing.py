@@ -36,28 +36,25 @@ def _money(value: Any) -> Decimal:
 
 def iter_active_promotions(channel: str) -> Iterator[Dict[str, Any]]:
     """Yield active promotions for a channel, highest priority first."""
-    from lambda_guards import MAX_PAGINATION_PAGES, _emit_guard_metric
-    table = dynamodb.Table(PROMOTION_TABLE)
-    last_key: Optional[Dict[str, Any]] = None
-    for page_num in range(MAX_PAGINATION_PAGES):
-        kwargs: Dict[str, Any] = {
-            "IndexName": PROMOTION_INDEX,
-            "KeyConditionExpression": Key("status").eq("ACTIVE"),
-            "ScanIndexForward": False,
-        }
-        if last_key:
-            kwargs["ExclusiveStartKey"] = last_key
-        response = table.query(**kwargs)
-        for item in response.get("Items", []):
+    from lambda_guards import safe_paginate
+    from boto3.dynamodb.types import TypeDeserializer
+    _deser = TypeDeserializer()
+
+    client = dynamodb.meta.client
+    paginator = client.get_paginator("query")
+    for page in safe_paginate(paginator,
+        TableName=PROMOTION_TABLE,
+        IndexName=PROMOTION_INDEX,
+        KeyConditionExpression="#st = :active",
+        ExpressionAttributeNames={"#st": "status"},
+        ExpressionAttributeValues={":active": {"S": "ACTIVE"}},
+        ScanIndexForward=False,
+    ):
+        for raw_item in page.get("Items", []):
+            item = {k: _deser.deserialize(v) for k, v in raw_item.items()}
             channels = item.get("channels") or []
             if not channels or channel in channels:
                 yield item
-        last_key = response.get("LastEvaluatedKey")
-        if not last_key:
-            break
-    else:
-        logger.warning("Pagination cap reached at %d pages.", MAX_PAGINATION_PAGES)
-        _emit_guard_metric("PaginationCapReached", 1)
 
 
 def _cart_subtotal(lines: List[Dict[str, Any]]) -> Decimal:

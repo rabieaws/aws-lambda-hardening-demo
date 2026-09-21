@@ -78,8 +78,8 @@ def iter_archived_events(
             "sequence_number": {"S": after_sequence},
         }
 
-    from lambda_guards import safe_iterate
-    for page in safe_iterate(paginator.paginate(**kwargs)):
+    from lambda_guards import safe_paginate
+    for page in safe_paginate(paginator, **kwargs):
         for item in page.get("Items", []):
             yield item
 
@@ -172,7 +172,9 @@ def continue_replay(
 
 
 def lambda_handler(event, context):
-    from lambda_guards import check_eventbridge_invocation_depth, safe_paginate
+    from lambda_guards import check_eventbridge_invocation_depth, validate_payload_size, safe_paginate
+
+    validate_payload_size(event)
 
     detail = event.get("detail") or {}
 

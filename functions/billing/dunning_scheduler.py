@@ -230,14 +230,24 @@ def process_record(record: Dict[str, Any]) -> str:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import validate_record_size, check_remaining_time, PermanentError, _emit_guard_metric
+
     outcomes: Dict[str, int] = {}
     failures: List[Dict[str, str]] = []
 
-    for record in event.get("Records", []):
+    records = event.get("Records", [])
+    for idx, record in enumerate(records):
         message_id = record.get("messageId", "unknown")
+        if not check_remaining_time(context):
+            failures.extend({"itemIdentifier": r.get("messageId", "unknown")} for r in records[idx:])
+            break
         try:
+            validate_record_size(record)
             outcome = process_record(record)
             outcomes[outcome] = outcomes.get(outcome, 0) + 1
+        except PermanentError as exc:
+            _emit_guard_metric("PermanentRecordDropped", 1)
+            logger.warning("dunning_record_oversized message_id=%s error=%s", message_id, exc)
         except json.JSONDecodeError:
             outcomes["invalid"] = outcomes.get("invalid", 0) + 1
             logger.error("dunning_body_not_json message_id=%s", message_id)

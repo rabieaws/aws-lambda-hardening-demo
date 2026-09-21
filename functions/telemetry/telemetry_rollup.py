@@ -166,12 +166,19 @@ def emit_pipeline_metrics(devices: int, series: int, readings: int, hour_label: 
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_remaining_time
+
     start_epoch, end_epoch, hour_label = _hour_window(int(time.time()))
     logger.info("rollup_start hour=%s window=%s-%s", hour_label, start_epoch, end_epoch)
 
     grouped = group_readings(iter_readings(start_epoch, end_epoch))
     total_readings = sum(len(values) for values in grouped.values())
     devices = len({device_id for device_id, _metric in grouped})
+
+    if not check_remaining_time(context):
+        logger.warning("rollup_time_remaining_low after grouping, skipping persist")
+        return {"hour": hour_label, "devices": devices, "series_written": 0,
+                "readings_aggregated": total_readings, "status": "TIMEOUT_EARLY_EXIT"}
 
     try:
         written = persist_rollups(grouped, hour_label)

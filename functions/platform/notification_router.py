@@ -215,7 +215,9 @@ def route(notification: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
-    from lambda_guards import check_sns_invocation_depth, _emit_guard_metric
+    from lambda_guards import check_sns_invocation_depth, validate_payload_size, _emit_guard_metric
+
+    validate_payload_size(event)
 
     notifications = decode_records(event)
     results: List[Dict[str, Any]] = []

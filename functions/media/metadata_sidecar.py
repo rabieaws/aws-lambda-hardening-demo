@@ -182,7 +182,9 @@ def _decode_key(raw: str) -> str:
 
 
 def lambda_handler(event, context):
-    from lambda_guards import check_s3_recursive_invocation
+    from lambda_guards import check_s3_recursive_invocation, validate_payload_size
+
+    validate_payload_size(event)
 
     if not check_s3_recursive_invocation(event):
         return {"sidecars_written": 0, "keys": [], "skipped": 0, "reason": "recursive_invocation_blocked"}

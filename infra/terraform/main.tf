@@ -43,6 +43,10 @@ locals {
   reporting_guard_vars = {
     MAX_PAYLOAD_SIZE_BYTES = "262144"
     MAX_PAGINATION_PAGES   = "100"
+    MAX_LOOP_ITERATIONS    = "1000"
+    MAX_RETRIES            = "3"
+    MAX_BACKOFF_SECONDS    = "10.0"
+    MAX_INVOCATION_DEPTH   = "3"
     MIN_REMAINING_MS       = "5000"
     SOURCE_PREFIX          = "settlements/"
     OUTPUT_PREFIX          = "reconciliation/"
@@ -371,6 +375,18 @@ resource "aws_lambda_function_event_invoke_config" "device_shadow_sync" {
 
 resource "aws_lambda_function_event_invoke_config" "cohort_export" {
   function_name          = aws_lambda_function.reporting["cohort_export"].function_name
+  maximum_retry_attempts = 1
+  maximum_event_age_in_seconds = 300
+
+  destination_config {
+    on_failure {
+      destination = aws_sqs_queue.reporting_dlq.arn
+    }
+  }
+}
+
+resource "aws_lambda_function_event_invoke_config" "dashboard_snapshot" {
+  function_name          = aws_lambda_function.reporting["dashboard_snapshot"].function_name
   maximum_retry_attempts = 1
   maximum_event_age_in_seconds = 300
 

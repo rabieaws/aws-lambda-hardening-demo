@@ -164,7 +164,9 @@ def continue_in_new_invocation(
 
 
 def lambda_handler(event, context):
-    from lambda_guards import check_invoke_depth
+    from lambda_guards import check_invoke_depth, validate_payload_size
+
+    validate_payload_size(event)
 
     ok, depth = check_invoke_depth(event)
     if not ok:

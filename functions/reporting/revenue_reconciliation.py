@@ -148,8 +148,9 @@ def classify(row: Dict[str, str], internal: List[Dict[str, Any]]) -> Tuple[str, 
     return "MATCHED", {"settled_amount": settled_amount, "internal_amount": internal_amount}
 
 
-def reconcile(rows: Iterable[Dict[str, str]]) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+def reconcile(rows: Iterable[Dict[str, str]], context=None) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """Reconcile every settled line. Returns (breaks, summary)."""
+    from lambda_guards import check_remaining_time
     breaks: List[Dict[str, Any]] = []
     matched = 0
     settled_total = Decimal("0.00")
@@ -157,6 +158,9 @@ def reconcile(rows: Iterable[Dict[str, str]]) -> Tuple[List[Dict[str, Any]], Dic
     by_kind: Dict[str, int] = {}
 
     for row in rows:
+        if context and not check_remaining_time(context):
+            logger.warning("reconciliation_time_remaining_low, stopping early")
+            break
         reference = (row.get("psp_reference") or "").strip()
         try:
             internal = query_internal_captures(reference)
@@ -238,7 +242,9 @@ def write_exceptions_report(
 
 
 def lambda_handler(event, context):
-    from lambda_guards import check_s3_recursive_invocation
+    from lambda_guards import check_s3_recursive_invocation, validate_payload_size
+
+    validate_payload_size(event)
 
     if not check_s3_recursive_invocation(event):
         return {"processed": 0, "results": [], "reason": "recursive_invocation_blocked"}
@@ -262,7 +268,7 @@ def lambda_handler(event, context):
             logger.error("settlement_parse_failed key=%s error=%s", key, exc)
             continue
 
-        breaks, summary = reconcile(rows)
+        breaks, summary = reconcile(rows, context)
 
         try:
             report_key = write_exceptions_report(key, breaks, summary)

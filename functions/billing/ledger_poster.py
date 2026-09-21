@@ -210,19 +210,29 @@ def process_record(record: Dict[str, Any]) -> Optional[str]:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import validate_record_size, check_remaining_time, PermanentError, _emit_guard_metric
+
     posted: List[str] = []
     duplicates = 0
     rejected = 0
     failures: List[Dict[str, str]] = []
 
-    for record in event.get("Records", []):
+    records = event.get("Records", [])
+    for idx, record in enumerate(records):
         message_id = record.get("messageId", "unknown")
+        if not check_remaining_time(context):
+            failures.extend({"itemIdentifier": r.get("messageId", "unknown")} for r in records[idx:])
+            break
         try:
+            validate_record_size(record)
             entry_id = process_record(record)
             if entry_id:
                 posted.append(entry_id)
             else:
                 duplicates += 1
+        except PermanentError as exc:
+            _emit_guard_metric("PermanentRecordDropped", 1)
+            logger.warning("entry_record_oversized message_id=%s error=%s", message_id, exc)
         except (UnbalancedEntry, FloorBreach) as exc:
             rejected += 1
             logger.error("entry_rejected message_id=%s reason=%s", message_id, exc)

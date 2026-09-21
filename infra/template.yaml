@@ -107,6 +107,9 @@ Resources:
           CATALOG_TABLE: !Ref CatalogTable
           FULFILMENT_QUEUE_URL: !Ref FulfilmentQueue
           MAX_PAYLOAD_SIZE_BYTES: "262144"
+          MAX_LOOP_ITERATIONS: "1000"
+          MAX_RETRIES: "3"
+          MAX_BACKOFF_SECONDS: "10.0"
           LOG_LEVEL: WARNING
       Events:
         Post:
@@ -132,6 +135,9 @@ Resources:
           PROMOTION_TABLE: !Ref PromotionTable
           MAX_PAYLOAD_SIZE_BYTES: "262144"
           MAX_PAGINATION_PAGES: "100"
+          MAX_LOOP_ITERATIONS: "1000"
+          MAX_RETRIES: "3"
+          MAX_BACKOFF_SECONDS: "10.0"
           LOG_LEVEL: WARNING
       Events:
         Post:
@@ -156,6 +162,9 @@ Resources:
           ORDER_TABLE: !Ref OrderTable
           MAX_PAGINATION_PAGES: "100"
           MAX_PAYLOAD_SIZE_BYTES: "262144"
+          MAX_LOOP_ITERATIONS: "1000"
+          MAX_RETRIES: "3"
+          MAX_BACKOFF_SECONDS: "10.0"
           LOG_LEVEL: WARNING
       Events:
         Get:
@@ -178,6 +187,9 @@ Resources:
         Variables:
           NOTIFICATION_TOPIC_ARN: !Ref OrderNotificationTopic
           MAX_PAYLOAD_SIZE_BYTES: "262144"
+          MAX_LOOP_ITERATIONS: "1000"
+          MAX_RETRIES: "3"
+          MAX_BACKOFF_SECONDS: "10.0"
           MIN_REMAINING_MS: "5000"
           LOG_LEVEL: WARNING
       Events:
@@ -216,6 +228,7 @@ Resources:
           MAX_RETRIES: "3"
           MAX_BACKOFF_SECONDS: "10.0"
           MAX_PAYLOAD_SIZE_BYTES: "262144"
+          MAX_LOOP_ITERATIONS: "1000"
           LOG_LEVEL: WARNING
 
   OrderArchiverFunction:
@@ -230,6 +243,9 @@ Resources:
           ORDER_TABLE: !Ref OrderTable
           ARCHIVE_BUCKET: !Ref ArchiveBucket
           MAX_PAGINATION_PAGES: "100"
+          MAX_LOOP_ITERATIONS: "1000"
+          MAX_RETRIES: "3"
+          MAX_BACKOFF_SECONDS: "10.0"
           MIN_REMAINING_MS: "5000"
           LOG_LEVEL: WARNING
       EventInvokeConfig:
@@ -260,6 +276,9 @@ Resources:
           INVOICE_TABLE: !Ref InvoiceTable
           SUBSCRIPTION_TABLE: !Ref SubscriptionTable
           MAX_PAYLOAD_SIZE_BYTES: "262144"
+          MAX_LOOP_ITERATIONS: "1000"
+          MAX_RETRIES: "3"
+          MAX_BACKOFF_SECONDS: "10.0"
           MIN_REMAINING_MS: "5000"
           LOG_LEVEL: WARNING
       Events:
@@ -285,6 +304,8 @@ Resources:
           AUTHORIZATION_TABLE: !Ref AuthorizationTable
           MAX_RETRIES: "3"
           MAX_BACKOFF_SECONDS: "10.0"
+          MAX_PAYLOAD_SIZE_BYTES: "262144"
+          MAX_LOOP_ITERATIONS: "1000"
           MIN_REMAINING_MS: "5000"
           LOG_LEVEL: WARNING
       Events:
@@ -309,6 +330,10 @@ Resources:
           JOURNAL_TABLE: !Ref JournalTable
           ACCOUNT_TABLE: !Ref AccountTable
           MAX_PAGINATION_PAGES: "100"
+          MAX_PAYLOAD_SIZE_BYTES: "262144"
+          MAX_LOOP_ITERATIONS: "1000"
+          MAX_RETRIES: "3"
+          MAX_BACKOFF_SECONDS: "10.0"
           MIN_REMAINING_MS: "5000"
           LOG_LEVEL: WARNING
       Events:
@@ -333,6 +358,10 @@ Resources:
           INVOICE_TABLE: !Ref InvoiceTable
           DUNNING_QUEUE_URL: !Ref DunningQueue
           MAX_INVOCATION_DEPTH: "3"
+          MAX_PAYLOAD_SIZE_BYTES: "262144"
+          MAX_LOOP_ITERATIONS: "1000"
+          MAX_RETRIES: "3"
+          MAX_BACKOFF_SECONDS: "10.0"
           MIN_REMAINING_MS: "5000"
           LOG_LEVEL: WARNING
       Events:

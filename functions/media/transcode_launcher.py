@@ -226,7 +226,9 @@ def _decode_key(raw: str) -> str:
 
 
 def lambda_handler(event, context):
-    from lambda_guards import check_s3_recursive_invocation, OUTPUT_PREFIX
+    from lambda_guards import check_s3_recursive_invocation, validate_payload_size, OUTPUT_PREFIX
+
+    validate_payload_size(event)
 
     if not check_s3_recursive_invocation(event):
         return {"submitted": 0, "jobs": [], "reason": "recursive_invocation_blocked"}

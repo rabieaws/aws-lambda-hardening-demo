@@ -166,7 +166,7 @@ def write_export(body: str, periods: int) -> Optional[str]:
 
 
 def lambda_handler(event, context):
-    from lambda_guards import validate_payload_size
+    from lambda_guards import validate_payload_size, check_remaining_time
 
     try:
         validate_payload_size(event)
@@ -180,6 +180,8 @@ def lambda_handler(event, context):
 
     try:
         signup_epoch_by_user, cohort_sizes = build_signup_index(since_epoch)
+        if not check_remaining_time(context):
+            raise RuntimeError("insufficient_time_remaining")
         grid = build_retention_grid(signup_epoch_by_user, since_epoch, periods)
     except ClientError as exc:
         logger.exception("cohort_build_failed error=%s", exc)

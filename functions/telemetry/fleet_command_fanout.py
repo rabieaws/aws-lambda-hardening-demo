@@ -13,7 +13,6 @@ import time
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import boto3
-from boto3.dynamodb.conditions import Key
 from botocore.exceptions import ClientError
 
 logger = logging.getLogger()
@@ -70,26 +69,26 @@ def decode_records(event: Dict[str, Any]) -> List[Tuple[Dict[str, Any], int]]:
 
 def iter_fleet_devices(fleet_id: str, cursor: Optional[str]) -> Iterator[Dict[str, Any]]:
     """Yield enrolled devices for a fleet, resuming from a cursor if given."""
-    from lambda_guards import MAX_PAGINATION_PAGES, _emit_guard_metric
-    table = dynamodb.Table(FLEET_TABLE)
-    start_key: Optional[Dict[str, Any]] = {"fleet_id": fleet_id, "device_id": cursor} if cursor else None
+    from lambda_guards import safe_paginate
+    from boto3.dynamodb.types import TypeDeserializer
+    _deser = TypeDeserializer()
 
-    for page_num in range(MAX_PAGINATION_PAGES):
-        kwargs: Dict[str, Any] = {
-            "IndexName": FLEET_INDEX,
-            "KeyConditionExpression": Key("fleet_id").eq(fleet_id),
-        }
-        if start_key:
-            kwargs["ExclusiveStartKey"] = start_key
-        response = table.query(**kwargs)
-        for item in response.get("Items", []):
+    client = dynamodb.meta.client
+    paginator = client.get_paginator("query")
+    kwargs: Dict[str, Any] = {
+        "TableName": FLEET_TABLE,
+        "IndexName": FLEET_INDEX,
+        "KeyConditionExpression": "fleet_id = :fid",
+        "ExpressionAttributeValues": {":fid": {"S": fleet_id}},
+    }
+    if cursor:
+        kwargs["ExclusiveStartKey"] = {"fleet_id": {"S": fleet_id}, "device_id": {"S": cursor}}
+
+    for page in safe_paginate(paginator, **kwargs):
+        for raw_item in page.get("Items", []):
+            item = {k: _deser.deserialize(v) for k, v in raw_item.items()}
             if str(item.get("enrollment_state", "")).upper() == "ENROLLED":
                 yield item
-        start_key = response.get("LastEvaluatedKey")
-        if not start_key:
-            return
-    logger.warning("Pagination cap reached at %d pages.", MAX_PAGINATION_PAGES)
-    _emit_guard_metric("PaginationCapReached", 1)
 
 
 def _minute_bucket(now: int) -> int:
@@ -230,7 +229,9 @@ def expand_command(command: Dict[str, Any], depth: int) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
-    from lambda_guards import MAX_INVOCATION_DEPTH, _emit_guard_metric
+    from lambda_guards import MAX_INVOCATION_DEPTH, validate_payload_size, _emit_guard_metric
+
+    validate_payload_size(event)
 
     commands = decode_records(event)
     results: List[Dict[str, Any]] = []
