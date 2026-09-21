@@ -10,7 +10,7 @@ hardening transformation across 4 IaC files and 30+ handler files.
 ### infra/template.yaml (SAM)
 - **Runtime**: python3.9 → python3.12 (all functions)
 - **Timeouts**: Explicit timeouts set — 25s for API Gateway handlers, 60s for SQS/stream consumers, 900s for order_archiver
-- **API Gateway**: Added explicit `CommerceApi` resource with JSON Schema request validation models (CheckoutRequestModel, CartPricingRequestModel), request parameter validation for GET /orders, and method-level throttling (burst: 100, rate: 50)
+- **API Gateway**: Added explicit `CommerceApi` resource with JSON Schema request validation models (CheckoutRequestModel, CartPricingRequestModel), request parameter validation for GET /orders, method-level throttling (burst: 100, rate: 50), and Cognito authorizer (`CognitoAuth`) as DefaultAuthorizer with 300s result caching TTL
 - **DLQs**: SQS source queues have RedrivePolicy (maxReceiveCount: 5); DynamoDB Streams has OnFailure destination; added DLQs for order_archiver and inventory_allocator
 - **EventInvokeConfig**: Added for order_archiver (Schedule) and inventory_allocator (async) with MaximumRetryAttempts: 1, MaximumEventAgeInSeconds: 300
 - **SQS MaximumConcurrency**: 10 on all 5 SQS event source mappings
@@ -34,7 +34,7 @@ hardening transformation across 4 IaC files and 30+ handler files.
 
 ### infra/cdk/app.py (CDK)
 - **Timeouts**: Explicit timeouts on all functions (25s–60s)
-- **API Gateway**: Added JSON Schema request validation (TenantRequestModel) and body validator for POST /tenants; method-level throttling (burst: 100, rate: 50)
+- **API Gateway**: Added JSON Schema request validation (TenantRequestModel) and body validator for POST /tenants; stage-level and method-level throttling (burst: 100, rate: 50); Cognito authorizer with 5-minute result caching TTL
 - **EventInvokeConfig**: Added for notification_router (SNS) and audit_event_replay (EventBridge) — retry_attempts: 1, max_event_age: 5 min, on_failure to platform_dlq
 - **SQS MaximumConcurrency**: 10 on tenant_provisioner SQS source
 - **RedrivePolicy**: Added dead_letter_queue on provisioning_queue (max_receive_count: 5)
@@ -231,12 +231,16 @@ order_status_stream uses custom depth tracking via item attributes.
 
 ## API Gateway Auth
 
-**NOTE**: No authorizer is currently configured on either the Commerce API (template.yaml)
-or the Platform API (CDK). Auth configuration depends on the project's authentication
-strategy (Cognito, Lambda authorizer, IAM). Request validation and throttling are
-configured as the immediate cost-avoidance controls. Auth should be added as a
-follow-up — an uncached authorizer is itself an invocation per request, so result
-caching TTL is critical when adding one.
+API Gateway authorizers are configured on both APIs:
+
+- **Commerce API (SAM)**: Cognito authorizer (`CognitoAuth`) as DefaultAuthorizer with 300s result caching TTL. Requires `CognitoUserPoolArn` parameter at deploy time.
+- **Platform API (CDK)**: Cognito authorizer (`PlatformCognitoAuth`) on POST /tenants with 5-minute result caching TTL. Requires `cognito_user_pool_arn` CDK context value at deploy time.
+
+**ACTION REQUIRED**: Provide the Cognito User Pool ARN at deployment:
+- SAM: `--parameter-overrides CognitoUserPoolArn=arn:aws:cognito-idp:...`
+- CDK: `-c cognito_user_pool_arn=arn:aws:cognito-idp:...`
+
+Result caching is enabled on both authorizers to prevent the authorizer Lambda/Cognito call from becoming an invocation-cost amplifier under load.
 
 ## Async Timeout-to-DLQ Interaction
 

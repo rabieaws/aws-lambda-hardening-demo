@@ -18,6 +18,9 @@ Parameters:
   Stage:
     Type: String
     Default: prod
+  CognitoUserPoolArn:
+    Type: String
+    Description: ARN of the Cognito User Pool for API Gateway authorization
 
 Resources:
 
@@ -30,7 +33,12 @@ Resources:
     Properties:
       StageName: !Ref Stage
       Auth:
-        DefaultAuthorizer: NONE
+        DefaultAuthorizer: CognitoAuth
+        Authorizers:
+          CognitoAuth:
+            UserPoolArn: !Ref CognitoUserPoolArn
+            Identity:
+              ReauthorizeEvery: 300
       Models:
         CheckoutRequestModel:
           type: object

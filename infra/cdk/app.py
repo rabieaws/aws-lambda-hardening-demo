@@ -6,6 +6,7 @@ import os
 import aws_cdk as cdk
 from aws_cdk import Duration, RemovalPolicy, Stack
 from aws_cdk import aws_apigateway as apigw
+from aws_cdk import aws_cognito as cognito
 from aws_cdk import aws_dynamodb as dynamodb
 from aws_cdk import aws_events as events
 from aws_cdk import aws_events_targets as targets
@@ -232,10 +233,28 @@ class PlatformStack(Stack):
                 **guard_env,
             },
         )
+        user_pool_arn = self.node.try_get_context("cognito_user_pool_arn") or ""
+        user_pool = cognito.UserPool.from_user_pool_arn(
+            self, "ImportedUserPool", user_pool_arn
+        ) if user_pool_arn else None
+
+        cognito_authorizer = apigw.CognitoUserPoolsAuthorizer(
+            self,
+            "PlatformCognitoAuth",
+            cognito_user_pools=[user_pool] if user_pool else [],
+            results_cache_ttl=Duration.minutes(5),
+        )
+
         api = apigw.RestApi(self, "PlatformApi", rest_api_name="platform",
             deploy_options=apigw.StageOptions(
                 throttling_burst_limit=100,
                 throttling_rate_limit=50,
+                method_options={
+                    "/*/*": apigw.MethodDeploymentOptions(
+                        throttling_burst_limit=100,
+                        throttling_rate_limit=50,
+                    ),
+                },
             ),
         )
         tenant_model = api.add_model(
@@ -271,6 +290,8 @@ class PlatformStack(Stack):
             apigw.LambdaIntegration(tenant_provisioner),
             request_models={"application/json": tenant_model},
             request_validator=request_validator,
+            authorizer=cognito_authorizer,
+            authorization_type=apigw.AuthorizationType.COGNITO,
         )
         tenant_provisioner.add_event_source(
             sources.SqsEventSource(
