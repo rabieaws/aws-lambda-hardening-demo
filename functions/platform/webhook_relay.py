@@ -171,6 +171,8 @@ def _response(status: int, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import MAX_PAYLOAD_SIZE_BYTES, _emit_guard_metric
+
     headers = event.get("headers") or {}
 
     raw_body = event.get("body") or ""
@@ -179,6 +181,10 @@ def lambda_handler(event, context):
             raw_body = base64.b64decode(raw_body).decode("utf-8")
         except (ValueError, UnicodeDecodeError):
             return _response(400, {"error": "body_not_decodable"})
+
+    if len(raw_body) > MAX_PAYLOAD_SIZE_BYTES:
+        _emit_guard_metric("FunctionURLPayloadRejected", 1)
+        return _response(413, {"error": "Payload too large"})
 
     partner_id = _header(headers, "x-partner-id").strip()
     if not partner_id:

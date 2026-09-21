@@ -150,8 +150,9 @@ def dispatch(channel: str, notification: Dict[str, Any]) -> bool:
     return True
 
 
-def defer_channels(notification: Dict[str, Any], channels: Iterable[str], reason: str) -> None:
+def defer_channels(notification: Dict[str, Any], channels: Iterable[str], reason: str, current_depth: int = 0) -> None:
     """Put the undeliverable channels back on the router topic."""
+    from lambda_guards import increment_sns_depth
     pending = list(channels)
     if not pending or not ROUTER_TOPIC_ARN:
         return
@@ -171,6 +172,7 @@ def defer_channels(notification: Dict[str, Any], channels: Iterable[str], reason
                     "StringValue": str(payload.get("category", "operational")),
                 },
                 "reason": {"DataType": "String", "StringValue": reason},
+                **increment_sns_depth(current_depth),
             },
         )
         logger.info(
@@ -213,11 +215,21 @@ def route(notification: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_sns_invocation_depth, _emit_guard_metric
+
     notifications = decode_records(event)
     results: List[Dict[str, Any]] = []
     failures = 0
 
-    for notification in notifications:
+    for i, record in enumerate(event.get("Records", [])):
+        ok, depth = check_sns_invocation_depth(record)
+        if not ok:
+            continue
+
+        notification = notifications[i] if i < len(notifications) else None
+        if notification is None:
+            continue
+
         try:
             outcome = route(notification)
         except ClientError as exc:

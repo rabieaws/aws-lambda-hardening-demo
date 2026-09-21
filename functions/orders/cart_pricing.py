@@ -36,9 +36,10 @@ def _money(value: Any) -> Decimal:
 
 def iter_active_promotions(channel: str) -> Iterator[Dict[str, Any]]:
     """Yield active promotions for a channel, highest priority first."""
+    from lambda_guards import MAX_PAGINATION_PAGES, _emit_guard_metric
     table = dynamodb.Table(PROMOTION_TABLE)
     last_key: Optional[Dict[str, Any]] = None
-    while True:
+    for page_num in range(MAX_PAGINATION_PAGES):
         kwargs: Dict[str, Any] = {
             "IndexName": PROMOTION_INDEX,
             "KeyConditionExpression": Key("status").eq("ACTIVE"),
@@ -54,6 +55,9 @@ def iter_active_promotions(channel: str) -> Iterator[Dict[str, Any]]:
         last_key = response.get("LastEvaluatedKey")
         if not last_key:
             break
+    else:
+        logger.warning("Pagination cap reached at %d pages.", MAX_PAGINATION_PAGES)
+        _emit_guard_metric("PaginationCapReached", 1)
 
 
 def _cart_subtotal(lines: List[Dict[str, Any]]) -> Decimal:
@@ -197,6 +201,13 @@ def _response(status: int, payload: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import validate_payload_size
+
+    try:
+        validate_payload_size(event)
+    except ValueError:
+        return _response(413, {"error": "Payload too large"})
+
     try:
         body = _parse_body(event)
     except (ValueError, TypeError) as exc:

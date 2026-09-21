@@ -147,8 +147,9 @@ def record_step(invoice_id: str, step_index: int, template: str) -> None:
     )
 
 
-def requeue(invoice_id: str, pass_number: int, delay_seconds: int) -> None:
+def requeue(invoice_id: str, pass_number: int, delay_seconds: int, current_depth: int = 0) -> None:
     """Put the invoice back on the dunning queue for its next rung."""
+    from lambda_guards import increment_sqs_depth
     if not DUNNING_QUEUE_URL:
         logger.warning("dunning_queue_unconfigured invoice=%s", invoice_id)
         return
@@ -159,12 +160,19 @@ def requeue(invoice_id: str, pass_number: int, delay_seconds: int) -> None:
         MessageAttributes={
             "invoice_id": {"DataType": "String", "StringValue": invoice_id},
             "pass_number": {"DataType": "Number", "StringValue": str(pass_number + 1)},
+            **increment_sqs_depth(current_depth),
         },
     )
 
 
 def process_record(record: Dict[str, Any]) -> str:
     """Advance one invoice through the dunning ladder. Returns the outcome."""
+    from lambda_guards import check_sqs_invocation_depth, _emit_guard_metric
+    ok, depth = check_sqs_invocation_depth(record)
+    if not ok:
+        _emit_guard_metric("DepthLimitReached", 1)
+        return "depth_exceeded"
+
     payload = json.loads(record.get("body") or "{}")
     invoice_id = str(payload.get("invoice_id", "")).strip()
     pass_number = int(payload.get("pass_number", 0))
@@ -190,7 +198,7 @@ def process_record(record: Dict[str, Any]) -> str:
 
     days_overdue = max((int(time.time()) - due_at) // SECONDS_PER_DAY, 0)
     if days_overdue <= 0:
-        requeue(invoice_id, pass_number, _delay_until_next_rung(days_overdue))
+        requeue(invoice_id, pass_number, _delay_until_next_rung(days_overdue), depth)
         return "not_yet_due"
 
     state = load_dunning_state(invoice_id)
@@ -198,7 +206,7 @@ def process_record(record: Dict[str, Any]) -> str:
 
     rung = _next_step(days_overdue, completed)
     if rung is None:
-        requeue(invoice_id, pass_number, _delay_until_next_rung(days_overdue))
+        requeue(invoice_id, pass_number, _delay_until_next_rung(days_overdue), depth)
         return "waiting"
 
     step_index, template, action = rung
@@ -212,7 +220,7 @@ def process_record(record: Dict[str, Any]) -> str:
     record_step(invoice_id, step_index, template)
 
     if action != "WRITE_OFF":
-        requeue(invoice_id, pass_number, _delay_until_next_rung(days_overdue))
+        requeue(invoice_id, pass_number, _delay_until_next_rung(days_overdue), depth)
 
     logger.info(
         "dunning_step_applied invoice=%s step=%s template=%s action=%s overdue_days=%s",

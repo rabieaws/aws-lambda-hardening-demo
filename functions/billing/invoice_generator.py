@@ -235,27 +235,42 @@ def process_record(record: Dict[str, Any]) -> Optional[str]:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_remaining_time, validate_record_size, _emit_guard_metric, PermanentError
+
     issued: List[str] = []
     skipped = 0
-    errors = 0
+    failures: List[Dict[str, str]] = []
 
-    for record in event.get("Records", []):
+    for i, record in enumerate(event.get("Records", [])):
         message_id = record.get("messageId", "unknown")
+
+        if not check_remaining_time(context):
+            failures.extend(
+                {"itemIdentifier": r.get("messageId", "unknown")}
+                for r in event.get("Records", [])[i:]
+            )
+            break
+
         try:
+            validate_record_size(record)
             invoice_id = process_record(record)
             if invoice_id:
                 issued.append(invoice_id)
             else:
                 skipped += 1
+        except PermanentError:
+            skipped += 1
+            logger.error("permanent_failure message_id=%s", message_id)
+            _emit_guard_metric("PermanentRecordDropped", 1)
         except json.JSONDecodeError:
             skipped += 1
             logger.error("invoice_body_not_json message_id=%s", message_id)
         except ClientError as exc:
-            errors += 1
             logger.exception("invoice_generation_failed message_id=%s error=%s", message_id, exc)
+            failures.append({"itemIdentifier": message_id})
 
     logger.info(
-        "invoice_batch_complete issued=%s skipped=%s errors=%s",
-        len(issued), skipped, errors,
+        "invoice_batch_complete issued=%s skipped=%s failed=%s",
+        len(issued), skipped, len(failures),
     )
-    return {"issued": len(issued), "invoice_ids": issued, "skipped": skipped, "errors": errors}
+    return {"batchItemFailures": failures}

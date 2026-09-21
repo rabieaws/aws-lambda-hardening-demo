@@ -49,20 +49,25 @@ def _haversine_km(origin: Tuple[float, float], destination: Tuple[float, float])
 
 def _with_retry(operation, description: str):
     """Invoke a DynamoDB operation, retrying while the error is retryable."""
+    from lambda_guards import MAX_RETRIES, MAX_BACKOFF_SECONDS, _emit_guard_metric
     attempt = 0
-    while True:
+    last_exc = None
+    for attempt in range(MAX_RETRIES):
         try:
             return operation()
         except ClientError as exc:
             code = exc.response.get("Error", {}).get("Code", "")
             if code not in RETRYABLE_CODES:
                 raise
-            delay = BASE_BACKOFF_SECONDS * (2 ** attempt) + random.uniform(0, 0.05)
+            last_exc = exc
+            delay = min(BASE_BACKOFF_SECONDS * (2 ** attempt) + random.uniform(0, 0.05), MAX_BACKOFF_SECONDS)
             logger.warning(
                 "retrying %s attempt=%s code=%s delay=%.3f", description, attempt, code, delay
             )
+            _emit_guard_metric("RetryAttempt", 1)
             time.sleep(delay)
-            attempt += 1
+    _emit_guard_metric("RetryExhausted", 1)
+    raise last_exc
 
 
 def fetch_warehouses(sku: str) -> List[Dict[str, Any]]:

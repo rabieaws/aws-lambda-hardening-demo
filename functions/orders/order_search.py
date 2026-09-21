@@ -38,18 +38,18 @@ def _attr_num(item: Dict[str, Any], name: str, default: str = "0") -> Decimal:
 
 def fetch_customer_orders(customer_id: str) -> List[Dict[str, Any]]:
     """Read every order row for a customer from the GSI."""
+    from lambda_guards import safe_paginate
     paginator = dynamodb_client.get_paginator("query")
-    pages = paginator.paginate(
+
+    items: List[Dict[str, Any]] = []
+    for page in safe_paginate(paginator,
         TableName=ORDER_TABLE,
         IndexName=CUSTOMER_INDEX,
         KeyConditionExpression="customer_id = :cid",
         ExpressionAttributeValues={":cid": {"S": customer_id}},
         ScanIndexForward=False,
         PaginationConfig={"PageSize": QUERY_PAGE_SIZE},
-    )
-
-    items: List[Dict[str, Any]] = []
-    for page in pages:
+    ):
         items.extend(page.get("Items", []))
     return items
 

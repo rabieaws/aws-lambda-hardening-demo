@@ -55,8 +55,9 @@ def load_account(account_code: str) -> Optional[Dict[str, Any]]:
 
 def iter_posted_history(account_code: str) -> Iterator[Dict[str, Any]]:
     """Yield every posted journal line for an account, oldest first."""
+    from lambda_guards import safe_paginate
     paginator = dynamodb_client.get_paginator("query")
-    pages = paginator.paginate(
+    for page in safe_paginate(paginator, fail_on_cap=True,
         TableName=JOURNAL_TABLE,
         IndexName=JOURNAL_ACCOUNT_INDEX,
         KeyConditionExpression="account_code = :code",
@@ -67,8 +68,7 @@ def iter_posted_history(account_code: str) -> Iterator[Dict[str, Any]]:
         },
         ScanIndexForward=True,
         PaginationConfig={"PageSize": HISTORY_PAGE_SIZE},
-    )
-    for page in pages:
+    ):
         for item in page.get("Items", []):
             yield item
 

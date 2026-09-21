@@ -82,9 +82,10 @@ def parse_riff_header(blob: bytes) -> Dict[str, Any]:
 
 def iter_pcm_chunks(bucket: str, key: str, start: int, total: int) -> Iterator[bytes]:
     """Yield the PCM payload in ranged reads until the data chunk is exhausted."""
+    from lambda_guards import MAX_LOOP_ITERATIONS, _emit_guard_metric
     position = start
     end = start + total
-    while True:
+    for _ in range(MAX_LOOP_ITERATIONS):
         if position >= end:
             return
         upper = min(position + CHUNK_BYTES, end) - 1
@@ -96,6 +97,9 @@ def iter_pcm_chunks(bucket: str, key: str, start: int, total: int) -> Iterator[b
             return
         yield payload
         position += len(payload)
+    else:
+        logger.warning("PCM chunk iteration cap reached at %d iterations.", MAX_LOOP_ITERATIONS)
+        _emit_guard_metric("IterationCapReached", 1)
 
 
 def accumulate_peaks(
@@ -138,7 +142,10 @@ def accumulate_peaks(
 
 
 def write_peaks(bucket: str, source_key: str, document: Dict[str, Any]) -> str:
-    target = source_key.rsplit(".", 1)[0] + ".peaks.json"
+    from lambda_guards import OUTPUT_PREFIX
+    stem = source_key.rsplit(".", 1)[0]
+    basename = stem.split("/")[-1] if "/" in stem else stem
+    target = "{0}{1}.peaks.json".format(OUTPUT_PREFIX, basename)
     s3.put_object(
         Bucket=bucket,
         Key=target,
@@ -153,6 +160,11 @@ def _decode_key(raw: str) -> str:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_s3_recursive_invocation
+
+    if not check_s3_recursive_invocation(event):
+        return {"peak_files_written": 0, "keys": [], "reason": "recursive_invocation_blocked"}
+
     written: List[str] = []
 
     for record in event.get("Records") or []:

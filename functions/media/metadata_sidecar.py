@@ -154,7 +154,10 @@ def parse_exif(payload: bytes) -> Dict[str, Any]:
 
 def sidecar_key(source_key: str) -> str:
     """Sidecar key derived from the source key."""
-    return source_key.rsplit(".", 1)[0] + ".meta.json"
+    from lambda_guards import OUTPUT_PREFIX
+    stem = source_key.rsplit(".", 1)[0]
+    basename = stem.split("/")[-1] if "/" in stem else stem
+    return "{0}{1}.meta.json".format(OUTPUT_PREFIX, basename)
 
 
 def write_sidecar(bucket: str, source_key: str, metadata: Dict[str, Any]) -> str:
@@ -179,6 +182,11 @@ def _decode_key(raw: str) -> str:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_s3_recursive_invocation
+
+    if not check_s3_recursive_invocation(event):
+        return {"sidecars_written": 0, "keys": [], "skipped": 0, "reason": "recursive_invocation_blocked"}
+
     written: List[str] = []
     skipped = 0
 

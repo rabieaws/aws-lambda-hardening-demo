@@ -67,7 +67,8 @@ def iter_archivable_orders(cutoff_epoch: int) -> Iterator[Dict[str, Any]]:
         PaginationConfig={"PageSize": SCAN_PAGE_SIZE},
     )
 
-    for page in pages:
+    from lambda_guards import safe_iterate
+    for page in safe_iterate(pages):
         for item in page.get("Items", []):
             yield item
 
@@ -134,6 +135,7 @@ def mark_archived(order_ids: List[str], archive_key: str) -> int:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_remaining_time
     cutoff_epoch = int(time.time()) - RETENTION_DAYS * SECONDS_PER_DAY
     logger.info(
         "archival_sweep_start cutoff=%s retention_days=%s",
@@ -148,6 +150,9 @@ def lambda_handler(event, context):
     objects_written: List[str] = []
 
     for item in iter_archivable_orders(cutoff_epoch):
+        if not check_remaining_time(context):
+            logger.warning("archival_sweep_early_exit remaining_time_low=1")
+            break
         row = _to_archive_row(item)
         if not row["order_id"]:
             continue

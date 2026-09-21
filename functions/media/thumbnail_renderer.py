@@ -129,8 +129,10 @@ def build_rendition_plan(
 
 def rendition_key(source_key: str, label: str) -> str:
     """Key for a rendition descriptor derived from the source key."""
+    from lambda_guards import OUTPUT_PREFIX
     stem = source_key.rsplit(".", 1)[0]
-    return "{0}/{1}.rendition.json".format(stem, label)
+    basename = stem.split("/")[-1] if "/" in stem else stem
+    return "{0}{1}/{2}.rendition.json".format(OUTPUT_PREFIX, basename, label)
 
 
 def write_rendition_descriptor(
@@ -158,6 +160,11 @@ def _decode_key(raw: str) -> str:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_s3_recursive_invocation, validate_payload_size, EXPECTED_SOURCE_PREFIX, OUTPUT_PREFIX
+
+    if not check_s3_recursive_invocation(event):
+        return {"renditions_written": 0, "keys": [], "skipped": 0, "reason": "recursive_invocation_blocked"}
+
     written: List[str] = []
     skipped = 0
 

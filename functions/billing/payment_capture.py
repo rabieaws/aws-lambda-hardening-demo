@@ -98,6 +98,7 @@ def _call_psp(body: Dict[str, Any]) -> Dict[str, Any]:
 
 def capture_at_psp(authorization: Dict[str, Any], amount: Decimal, capture_id: str) -> Dict[str, Any]:
     """Send the capture to the PSP, retrying while the failure is transient."""
+    from lambda_guards import MAX_RETRIES, MAX_BACKOFF_SECONDS, _emit_guard_metric
     body = {
         "capture_id": capture_id,
         "psp_authorization_reference": str(authorization.get("psp_reference", "")),
@@ -105,8 +106,8 @@ def capture_at_psp(authorization: Dict[str, Any], amount: Decimal, capture_id: s
         "currency": str(authorization.get("currency", "USD")),
     }
 
-    attempt = 0
-    while True:
+    last_exception = None
+    for attempt in range(MAX_RETRIES):
         try:
             response = _call_psp(body)
             code = str(response.get("decline_code", "")).lower()
@@ -116,13 +117,18 @@ def capture_at_psp(authorization: Dict[str, Any], amount: Decimal, capture_id: s
         except urllib.error.HTTPError as exc:
             if exc.code not in RETRYABLE_STATUS:
                 raise CaptureRejected("psp rejected with status %s" % exc.code)
+            last_exception = exc
             logger.info("psp_transient status=%s attempt=%s", exc.code, attempt)
         except (urllib.error.URLError, TimeoutError, json.JSONDecodeError) as exc:
+            last_exception = exc
             logger.info("psp_unreachable attempt=%s error=%s", attempt, exc)
 
-        delay = BASE_BACKOFF_SECONDS * (2 ** attempt) + random.uniform(0, 0.2)
+        delay = min(BASE_BACKOFF_SECONDS * (2 ** attempt) + random.uniform(0, 0.2), MAX_BACKOFF_SECONDS)
+        _emit_guard_metric("RetryAttempt", 1)
         time.sleep(delay)
-        attempt += 1
+
+    _emit_guard_metric("RetryExhausted", 1)
+    raise last_exception
 
 
 def record_capture(

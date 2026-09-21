@@ -175,29 +175,41 @@ def process_record(record: Dict[str, Any]) -> str:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_remaining_time, validate_record_size, _emit_guard_metric, PermanentError
+
     records = event.get("Records", [])
     counts: Dict[str, int] = {"valid": 0, "invalid": 0, "initial": 0, "noop": 0, "error": 0}
+    failures = []
 
-    for record in records:
+    for i, record in enumerate(records):
+        if not check_remaining_time(context):
+            failures.extend(
+                {"itemIdentifier": r.get("eventID")} for r in records[i:]
+            )
+            break
+
         try:
+            validate_record_size(record)
             transition = process_record(record)
             counts[transition] = counts.get(transition, 0) + 1
+        except PermanentError:
+            logger.error("permanent_failure event_id=%s", record.get("eventID"))
+            _emit_guard_metric("PermanentRecordDropped", 1)
         except ClientError as exc:
             counts["error"] += 1
             logger.exception(
                 "projection_failed event_id=%s error=%s", record.get("eventID"), exc
             )
+            failures.append({"itemIdentifier": record.get("eventID")})
         except Exception as exc:  # noqa: BLE001 - keep the shard moving
             counts["error"] += 1
             logger.exception(
                 "projection_unexpected_error event_id=%s error=%s", record.get("eventID"), exc
             )
+            failures.append({"itemIdentifier": record.get("eventID")})
 
     logger.info(
         "status_projection_complete records=%s valid=%s invalid=%s errors=%s",
         len(records), counts["valid"], counts["invalid"], counts["error"],
     )
-    return {
-        "statusCode": 200,
-        "body": json.dumps({"processed": len(records), "counts": counts}),
-    }
+    return {"batchItemFailures": failures}

@@ -78,7 +78,8 @@ def iter_archived_events(
             "sequence_number": {"S": after_sequence},
         }
 
-    for page in paginator.paginate(**kwargs):
+    from lambda_guards import safe_iterate
+    for page in safe_iterate(paginator.paginate(**kwargs)):
         for item in page.get("Items", []):
             yield item
 
@@ -137,9 +138,11 @@ def emit_batch(details: List[Dict[str, Any]]) -> Tuple[int, int]:
 
 
 def continue_replay(
-    start_epoch: int, end_epoch: int, day: str, last_sequence: str, pass_number: int
+    start_epoch: int, end_epoch: int, day: str, last_sequence: str, pass_number: int,
+    current_depth: int = 0,
 ) -> None:
     """Put a continuation instruction back on the audit bus."""
+    from lambda_guards import MAX_INVOCATION_DEPTH
     detail = {
         "replay_request": True,
         "start_epoch": start_epoch,
@@ -147,6 +150,7 @@ def continue_replay(
         "resume_day": day,
         "resume_after_sequence": last_sequence,
         "pass_number": pass_number + 1,
+        "_invocation_depth": current_depth + 1,
     }
     try:
         events.put_events(
@@ -168,7 +172,14 @@ def continue_replay(
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_eventbridge_invocation_depth, safe_paginate
+
     detail = event.get("detail") or {}
+
+    ok, depth = check_eventbridge_invocation_depth(detail)
+    if not ok:
+        return {"status": "DEPTH_EXCEEDED", "reason": "max invocation depth reached"}
+
     start_epoch = int(detail.get("start_epoch", 0))
     end_epoch = int(detail.get("end_epoch", int(time.time())))
     resume_day = detail.get("resume_day")
@@ -212,7 +223,7 @@ def lambda_handler(event, context):
                     accepted, batch_failed = emit_batch(pending)
                     emitted += accepted
                     failed += batch_failed
-                continue_replay(start_epoch, end_epoch, day, last_sequence, pass_number)
+                continue_replay(start_epoch, end_epoch, day, last_sequence, pass_number, depth)
                 logger.info(
                     "replay_partial day=%s emitted=%s failed=%s skipped=%s",
                     day, emitted, failed, skipped,

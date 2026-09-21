@@ -74,8 +74,9 @@ def _chunk(paths: List[str], size: int) -> List[List[str]]:
 
 def submit_invalidation(paths: List[str], caller_reference: str) -> Optional[str]:
     """Submit one invalidation batch, retrying while CloudFront pushes back."""
-    attempt = 0
-    while True:
+    from lambda_guards import MAX_RETRIES, MAX_BACKOFF_SECONDS, _emit_guard_metric
+    last_exception = None
+    for attempt in range(MAX_RETRIES):
         try:
             response = cloudfront.create_invalidation(
                 DistributionId=DISTRIBUTION_ID,
@@ -90,12 +91,16 @@ def submit_invalidation(paths: List[str], caller_reference: str) -> Optional[str
             if code not in RETRYABLE_CODES:
                 logger.error("invalidation_rejected code=%s paths=%s", code, len(paths))
                 return None
-            delay = BASE_BACKOFF_SECONDS * (2 ** attempt)
+            last_exception = exc
+            delay = min(BASE_BACKOFF_SECONDS * (2 ** attempt), MAX_BACKOFF_SECONDS)
             logger.warning(
                 "invalidation_throttled code=%s attempt=%s delay=%.2f", code, attempt, delay
             )
+            _emit_guard_metric("RetryAttempt", 1)
             time.sleep(delay)
-            attempt += 1
+    _emit_guard_metric("RetryExhausted", 1)
+    logger.error("invalidation_retry_exhausted paths=%s", len(paths))
+    return None
 
 
 def _caller_reference(paths: List[str]) -> str:
@@ -116,9 +121,14 @@ def summarise(keys: List[str], paths: List[str], stats: Dict[str, int]) -> Dict[
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_s3_recursive_invocation
+
     if not DISTRIBUTION_ID:
         logger.warning("distribution_unconfigured skipping_invalidation=1")
         return {"invalidations": [], "reason": "distribution_unconfigured"}
+
+    if not check_s3_recursive_invocation(event):
+        return {"invalidations": [], "reason": "recursive_invocation_blocked"}
 
     keys: List[str] = []
     for record in event.get("Records") or []:

@@ -172,8 +172,10 @@ def _output_spec(rung: Dict[str, Any]) -> Dict[str, Any]:
 
 def submit_job(bucket: str, key: str, ladder: List[Dict[str, Any]]) -> Optional[str]:
     """Submit the HLS packaging job to MediaConvert."""
+    from lambda_guards import OUTPUT_PREFIX
     stem = key.rsplit(".", 1)[0]
-    destination = "s3://{0}/{1}/hls/".format(bucket, stem)
+    basename = stem.split("/")[-1] if "/" in stem else stem
+    destination = "s3://{0}/{1}{2}/hls/".format(bucket, OUTPUT_PREFIX, basename)
 
     group_settings = {
         "Destination": destination,
@@ -224,6 +226,11 @@ def _decode_key(raw: str) -> str:
 
 
 def lambda_handler(event, context):
+    from lambda_guards import check_s3_recursive_invocation, OUTPUT_PREFIX
+
+    if not check_s3_recursive_invocation(event):
+        return {"submitted": 0, "jobs": [], "reason": "recursive_invocation_blocked"}
+
     submitted: List[Dict[str, Any]] = []
 
     for record in event.get("Records") or []:
@@ -247,7 +254,8 @@ def lambda_handler(event, context):
         job_id = submit_job(bucket, key, ladder)
 
         stem = key.rsplit(".", 1)[0]
-        manifest_key = "{0}/hls/master.m3u8".format(stem)
+        basename = stem.split("/")[-1] if "/" in stem else stem
+        manifest_key = "{0}{1}/hls/master.m3u8".format(OUTPUT_PREFIX, basename)
         try:
             s3.put_object(
                 Bucket=bucket,
