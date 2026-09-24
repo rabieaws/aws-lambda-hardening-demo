@@ -1,16 +1,26 @@
-service: media-and-messaging
+service: media-pipeline
 
 frameworkVersion: '3'
 
 provider:
   name: aws
-  runtime: python3.11
+  runtime: python3.12
   region: us-east-1
   stage: ${opt:stage, 'prod'}
-  memorySize: 512
+  memorySize: 1024
+  timeout: 60
   environment:
-    LOG_LEVEL: INFO
+    LOG_LEVEL: WARNING
     STAGE: ${self:provider.stage}
+    SOURCE_PREFIX: "uploads/"
+    OUTPUT_PREFIX: "processed/"
+    MAX_PAYLOAD_SIZE_BYTES: "262144"
+    MAX_LOOP_ITERATIONS: "1000"
+    MAX_RETRIES: "3"
+    MAX_BACKOFF_SECONDS: "10.0"
+    MAX_PAGINATION_PAGES: "100"
+    MAX_INVOCATION_DEPTH: "3"
+    MIN_REMAINING_MS: "5000"
   iam:
     role:
       statements:
@@ -18,293 +28,173 @@ provider:
           Action:
             - s3:GetObject
             - s3:PutObject
-            - s3:CopyObject
-            - s3:ListBucket
-          Resource:
-            - arn:aws:s3:::media-assets-${self:provider.stage}
-            - arn:aws:s3:::media-assets-${self:provider.stage}/*
+          Resource: !Sub '${MediaBucket.Arn}/*'
         - Effect: Allow
           Action:
-            - sqs:SendMessage
-            - sqs:ReceiveMessage
-            - sqs:DeleteMessage
-            - sns:Publish
-            - dynamodb:GetItem
-            - dynamodb:PutItem
-            - dynamodb:UpdateItem
-            - dynamodb:Query
+            - mediaconvert:CreateJob
+            - cloudfront:CreateInvalidation
           Resource: '*'
 
 package:
   individually: true
-  patterns:
-    - '!./**'
 
 functions:
 
-  # --------------------------------------------------------- media_pipeline
-
-  imageThumbnailGenerator:
-    handler: image_thumbnail_generator.lambda_handler
+  thumbnailRenderer:
+    handler: thumbnail_renderer.lambda_handler
     package:
       patterns:
-        - '../lambdas/media_pipeline/image_thumbnail_generator.py'
+        - '../functions/media/thumbnail_renderer.py'
+        - '../functions/media/lambda_guards.py'
+    maximumRetryAttempts: 1
+    maximumEventAge: 300
+    destinations:
+      onFailure:
+        arn:
+          Fn::GetAtt: [MediaDLQ, Arn]
+        type: sqs
     events:
       - s3:
-          bucket: media-assets-${self:provider.stage}
+          bucket: !Ref MediaBucket
           event: s3:ObjectCreated:*
           existing: true
+          rules:
+            - prefix: uploads/
 
-  videoTranscodeOrchestrator:
-    handler: video_transcode_orchestrator.lambda_handler
-    timeout: 900
-    package:
-      patterns:
-        - '../lambdas/media_pipeline/video_transcode_orchestrator.py'
-    events:
-      - s3:
-          bucket: media-assets-${self:provider.stage}
-          event: s3:ObjectCreated:*
-          existing: true
-
-  exifMetadataExtractor:
-    handler: exif_metadata_extractor.lambda_handler
-    package:
-      patterns:
-        - '../lambdas/media_pipeline/exif_metadata_extractor.py'
-    events:
-      - s3:
-          bucket: media-assets-${self:provider.stage}
-          event: s3:ObjectCreated:*
-          existing: true
-
-  subtitleBurnIn:
-    handler: subtitle_burn_in.lambda_handler
-    package:
-      patterns:
-        - '../lambdas/media_pipeline/subtitle_burn_in.py'
-    events:
-      - s3:
-          bucket: media-assets-${self:provider.stage}
-          event: s3:ObjectCreated:*
-          existing: true
-
-  audioWaveformPeaks:
-    handler: audio_waveform_peaks.lambda_handler
-    timeout: 900
+  transcodeLauncher:
+    handler: transcode_launcher.lambda_handler
     memorySize: 1536
-    package:
-      patterns:
-        - '../lambdas/media_pipeline/audio_waveform_peaks.py'
-    events:
-      - s3:
-          bucket: media-assets-${self:provider.stage}
-          event: s3:ObjectCreated:*
-          existing: true
-
-  contentModerationScreener:
-    handler: content_moderation_screener.lambda_handler
-    package:
-      patterns:
-        - '../lambdas/media_pipeline/content_moderation_screener.py'
-    events:
-      - s3:
-          bucket: media-assets-${self:provider.stage}
-          event: s3:ObjectCreated:*
-          existing: true
-
-  mediaManifestBuilder:
-    handler: media_manifest_builder.lambda_handler
-    package:
-      patterns:
-        - '../lambdas/media_pipeline/media_manifest_builder.py'
-    events:
-      - s3:
-          bucket: media-assets-${self:provider.stage}
-          event: s3:ObjectCreated:*
-          existing: true
-
-  watermarkApplier:
-    handler: watermark_applier.lambda_handler
-    memorySize: 1536
-    package:
-      patterns:
-        - '../lambdas/media_pipeline/watermark_applier.py'
-    events:
-      - s3:
-          bucket: media-assets-${self:provider.stage}
-          event: s3:ObjectCreated:*
-          existing: true
-
-  cdnCacheInvalidator:
-    handler: cdn_cache_invalidator.lambda_handler
     environment:
-      CLOUDFRONT_DISTRIBUTION_ID: ${env:CLOUDFRONT_DISTRIBUTION_ID, ''}
+      MEDIACONVERT_ROLE: ${env:MEDIACONVERT_ROLE, ''}
+      MEDIACONVERT_QUEUE: ${env:MEDIACONVERT_QUEUE, ''}
     package:
       patterns:
-        - '../lambdas/media_pipeline/cdn_cache_invalidator.py'
+        - '../functions/media/transcode_launcher.py'
+        - '../functions/media/lambda_guards.py'
+    maximumRetryAttempts: 1
+    maximumEventAge: 300
+    destinations:
+      onFailure:
+        arn:
+          Fn::GetAtt: [MediaDLQ, Arn]
+        type: sqs
     events:
       - s3:
-          bucket: media-assets-${self:provider.stage}
+          bucket: !Ref MediaBucket
           event: s3:ObjectCreated:*
           existing: true
+          rules:
+            - prefix: uploads/
 
-  archivalTierMover:
-    handler: archival_tier_mover.lambda_handler
+  metadataSidecar:
+    handler: metadata_sidecar.lambda_handler
+    package:
+      patterns:
+        - '../functions/media/metadata_sidecar.py'
+        - '../functions/media/lambda_guards.py'
+    maximumRetryAttempts: 1
+    maximumEventAge: 300
+    destinations:
+      onFailure:
+        arn:
+          Fn::GetAtt: [MediaDLQ, Arn]
+        type: sqs
+    events:
+      - s3:
+          bucket: !Ref MediaBucket
+          event: s3:ObjectCreated:*
+          existing: true
+          rules:
+            - prefix: uploads/
+
+  waveformExtractor:
+    handler: waveform_extractor.lambda_handler
     timeout: 900
+    memorySize: 2048
     package:
       patterns:
-        - '../lambdas/media_pipeline/archival_tier_mover.py'
+        - '../functions/media/waveform_extractor.py'
+        - '../functions/media/lambda_guards.py'
+    maximumRetryAttempts: 1
+    maximumEventAge: 300
+    destinations:
+      onFailure:
+        arn:
+          Fn::GetAtt: [MediaDLQ, Arn]
+        type: sqs
     events:
-      - schedule: cron(0 3 * * ? *)
+      - s3:
+          bucket: !Ref MediaBucket
+          event: s3:ObjectCreated:*
+          existing: true
+          rules:
+            - prefix: uploads/
 
-  # -------------------------------------------------------------- messaging
-
-  notificationFanoutRouter:
-    handler: notification_fanout_router.lambda_handler
+  cdnInvalidator:
+    handler: cdn_invalidator.lambda_handler
     environment:
-      FANOUT_TOPIC_ARN: !Ref NotificationFanoutTopic
+      DISTRIBUTION_ID: ${env:DISTRIBUTION_ID, ''}
     package:
       patterns:
-        - '../lambdas/messaging/notification_fanout_router.py'
+        - '../functions/media/cdn_invalidator.py'
+        - '../functions/media/lambda_guards.py'
+    maximumRetryAttempts: 1
+    maximumEventAge: 300
+    destinations:
+      onFailure:
+        arn:
+          Fn::GetAtt: [MediaDLQ, Arn]
+        type: sqs
     events:
-      - sns:
-          arn: !Ref NotificationFanoutTopic
-          topicName: notification-fanout-${self:provider.stage}
-
-  sqsDlqRedriver:
-    handler: sqs_dlq_redriver.lambda_handler
-    timeout: 900
-    package:
-      patterns:
-        - '../lambdas/messaging/sqs_dlq_redriver.py'
-    events:
-      - schedule: rate(15 minutes)
-
-  emailDigestBatcher:
-    handler: email_digest_batcher.lambda_handler
-    package:
-      patterns:
-        - '../lambdas/messaging/email_digest_batcher.py'
-    events:
-      - sqs:
-          arn: !GetAtt EmailDigestQueue.Arn
-          batchSize: 10
-
-  pushTokenPruner:
-    handler: push_token_pruner.lambda_handler
-    timeout: 900
-    package:
-      patterns:
-        - '../lambdas/messaging/push_token_pruner.py'
-    events:
-      - schedule: cron(0 4 * * ? *)
-
-  webhookRetryScheduler:
-    handler: webhook_retry_scheduler.lambda_handler
-    environment:
-      RETRY_QUEUE_URL: !Ref WebhookRetryQueue
-    package:
-      patterns:
-        - '../lambdas/messaging/webhook_retry_scheduler.py'
-    events:
-      - sqs:
-          arn: !GetAtt WebhookRetryQueue.Arn
-          batchSize: 10
-
-  smsRateGovernor:
-    handler: sms_rate_governor.lambda_handler
-    package:
-      patterns:
-        - '../lambdas/messaging/sms_rate_governor.py'
-    events:
-      - sqs:
-          arn: !GetAtt SmsOutboundQueue.Arn
-          batchSize: 10
-
-  chatMessageBroadcaster:
-    handler: chat_message_broadcaster.lambda_handler
-    environment:
-      BROADCAST_TOPIC_ARN: !Ref ChatBroadcastTopic
-    package:
-      patterns:
-        - '../lambdas/messaging/chat_message_broadcaster.py'
-    events:
-      - sns:
-          arn: !Ref ChatBroadcastTopic
-          topicName: chat-room-broadcast-${self:provider.stage}
-
-  topicSubscriptionReconciler:
-    handler: topic_subscription_reconciler.lambda_handler
-    timeout: 900
-    package:
-      patterns:
-        - '../lambdas/messaging/topic_subscription_reconciler.py'
-    events:
-      - schedule: rate(1 hour)
-
-  eventOrderingBuffer:
-    handler: event_ordering_buffer.lambda_handler
-    environment:
-      BUFFER_QUEUE_URL: !Ref EventOrderingQueue
-    package:
-      patterns:
-        - '../lambdas/messaging/event_ordering_buffer.py'
-    events:
-      - sqs:
-          arn: !GetAtt EventOrderingQueue.Arn
-          batchSize: 10
-
-  campaignThrottleDispatcher:
-    handler: campaign_throttle_dispatcher.lambda_handler
-    environment:
-      CAMPAIGN_DISPATCH_QUEUE_URL: !Ref CampaignDispatchQueue
-    package:
-      patterns:
-        - '../lambdas/messaging/campaign_throttle_dispatcher.py'
-    events:
-      - sqs:
-          arn: !GetAtt CampaignDispatchQueue.Arn
-          batchSize: 10
+      - s3:
+          bucket: !Ref MediaBucket
+          event: s3:ObjectCreated:*
+          existing: true
+          rules:
+            - prefix: uploads/
 
 resources:
   Resources:
-    NotificationFanoutTopic:
-      Type: AWS::SNS::Topic
-      Properties:
-        TopicName: notification-fanout-${self:provider.stage}
 
-    ChatBroadcastTopic:
-      Type: AWS::SNS::Topic
+    MediaBucket:
+      Type: AWS::S3::Bucket
       Properties:
-        TopicName: chat-room-broadcast-${self:provider.stage}
+        BucketName: media-assets-${self:provider.stage}
+        VersioningConfiguration:
+          Status: Enabled
 
-    EmailDigestQueue:
+    MediaDLQ:
       Type: AWS::SQS::Queue
       Properties:
-        QueueName: email-digest-events-${self:provider.stage}
-        VisibilityTimeout: 300
+        QueueName: media-pipeline-dlq-${self:provider.stage}
+        MessageRetentionPeriod: 1209600
 
-    WebhookRetryQueue:
-      Type: AWS::SQS::Queue
+    ThumbnailRendererLogGroup:
+      Type: AWS::Logs::LogGroup
       Properties:
-        QueueName: webhook-retry-scheduler-${self:provider.stage}
-        VisibilityTimeout: 300
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-thumbnailRenderer
+        RetentionInDays: 30
 
-    SmsOutboundQueue:
-      Type: AWS::SQS::Queue
+    TranscodeLauncherLogGroup:
+      Type: AWS::Logs::LogGroup
       Properties:
-        QueueName: sms-outbound-${self:provider.stage}
-        VisibilityTimeout: 300
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-transcodeLauncher
+        RetentionInDays: 30
 
-    EventOrderingQueue:
-      Type: AWS::SQS::Queue
+    MetadataSidecarLogGroup:
+      Type: AWS::Logs::LogGroup
       Properties:
-        QueueName: event-ordering-buffer-${self:provider.stage}
-        VisibilityTimeout: 300
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-metadataSidecar
+        RetentionInDays: 30
 
-    CampaignDispatchQueue:
-      Type: AWS::SQS::Queue
+    WaveformExtractorLogGroup:
+      Type: AWS::Logs::LogGroup
       Properties:
-        QueueName: campaign-dispatch-${self:provider.stage}
-        VisibilityTimeout: 300
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-waveformExtractor
+        RetentionInDays: 30
+
+    CdnInvalidatorLogGroup:
+      Type: AWS::Logs::LogGroup
+      Properties:
+        LogGroupName: /aws/lambda/${self:service}-${self:provider.stage}-cdnInvalidator
+        RetentionInDays: 30
